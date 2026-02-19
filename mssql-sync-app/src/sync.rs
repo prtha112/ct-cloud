@@ -89,15 +89,101 @@ async fn sync_table(
     // 3. Get last synced version from Redis
     let last_version = state::get_last_version(redis_client, table_name).await?;
 
-    if current_version <= last_version {
+    // Check for Force Full Load Flag
+    let force_full_load = state::should_force_full_load(redis_client, table_name).await.unwrap_or(false);
+
+    if !force_full_load && current_version <= last_version {
         return Ok(());
     }
 
+    // Prepare Column List for SELECT (needed for both Full Load and Incremental)
+    // CAST decimal/numeric to avoid NumericN panic
+    let cols_query = format!(
+        "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
+        table_name
+    );
+    let columns: Vec<(String, String)> = sqlx::query(&cols_query)
+        .map(|row: MssqlRow| (row.get("COLUMN_NAME"), row.get("DATA_TYPE")))
+        .fetch_all(primary_pool)
+        .await?;
+        
+    let select_list = columns.iter().map(|(name, dtype)| {
+        if ["decimal", "numeric", "money", "smallmoney", "float", "real"].contains(&dtype.as_str()) {
+             // Cast to string to safely transport through sqlx (avoid NumericN panic)
+             // VARCHAR(MAX) fits any number representation
+             format!("CAST([{}] AS VARCHAR(MAX)) AS [{}]", name, name) 
+        } else {
+             format!("[{}]", name)
+        }
+    }).collect::<Vec<_>>().join(", ");
+
+
+    // --- FORCE FULL LOAD LOGIC ---
+    if force_full_load {
+        info!("FORCE FULL LOAD detected for table: {}", table_name);
+
+        // 1. Truncate Replica
+        let truncate_sql = format!("TRUNCATE TABLE [{}]", table_name);
+        sqlx::query(&truncate_sql).execute(replica_pool).await?;
+        
+        // 2. Initial Full Load (SELECT * FROM Primary)
+        let full_query = format!("SELECT {} FROM [{}]", select_list, table_name);
+        let rows = sqlx::query(&full_query).fetch_all(primary_pool).await?; 
+        
+        info!("Force Load: Inserting {} rows into {}", rows.len(), table_name);
+        
+        for row in rows {
+            // Build INSERT
+             let mut cols = Vec::new();
+             let mut placeholders = Vec::new();
+
+             for col in row.columns() {
+                 let name = col.name();
+                 cols.push(format!("[{}]", name));
+                 placeholders.push(format!("@p{}", cols.len()));
+             }
+
+             let insert_sql = format!(
+                 "INSERT INTO [{}] ({}) VALUES ({})",
+                 table_name,
+                 cols.join(", "),
+                 placeholders.join(", ")
+             );
+
+             let mut query_builder = sqlx::query(&insert_sql);
+             
+             // Bind values
+             for col in row.columns() {
+                 let type_name = col.type_info().name();
+                 if type_name == "INT" || type_name == "INTEGER" {
+                      let v: Option<i32> = row.try_get(col.ordinal()).ok();
+                      query_builder = query_builder.bind(v);
+                 } else if type_name == "BIGINT" {
+                      let v: Option<i64> = row.try_get(col.ordinal()).ok();
+                      query_builder = query_builder.bind(v);
+                 } else {
+                      let v: Option<String> = row.try_get(col.ordinal()).ok();
+                      query_builder = query_builder.bind(v);
+                 }
+             }
+             
+             query_builder.execute(replica_pool).await?;
+        }
+        
+        // 3. Update Sync Version
+        state::set_last_version(redis_client, table_name, current_version).await?;
+        
+        // 4. Clear Flag
+        state::clear_force_full_load(redis_client, table_name).await?;
+        
+        info!("Force Full Load complete for table: {}", table_name);
+        return Ok(());
+    }
+    // -----------------------------
+
     info!("Syncing {} from v{} to v{}", table_name, last_version, current_version);
 
-    // 4. Get Changes
-    
-    // Let's get PK column name first
+    // 4. Get Changes (Incremental Logic)
     let pk_col_query = format!(
         "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
          WHERE OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_SCHEMA + '.' + CONSTRAINT_NAME), 'IsPrimaryKey') = 1 
@@ -124,26 +210,6 @@ async fn sync_table(
         .bind(last_version)
         .fetch_all(primary_pool)
         .await?;
-
-    // Prepare Column List for SELECT (CAST decimal/numeric to avoid NumericN panic)
-    let cols_query = format!(
-        "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
-        table_name
-    );
-    let columns: Vec<(String, String)> = sqlx::query(&cols_query)
-        .map(|row: MssqlRow| (row.get("COLUMN_NAME"), row.get("DATA_TYPE")))
-        .fetch_all(primary_pool)
-        .await?;
-        
-    let select_list = columns.iter().map(|(name, dtype)| {
-        if ["decimal", "numeric", "money", "smallmoney", "float", "real"].contains(&dtype.as_str()) {
-             // Cast to string to safely transport through sqlx (avoid NumericN panic)
-             // VARCHAR(MAX) fits any number representation
-             format!("CAST([{}] AS VARCHAR(MAX)) AS [{}]", name, name) 
-        } else {
-             format!("[{}]", name)
-        }
-    }).collect::<Vec<_>>().join(", ");
 
     for change in &changes {
         let _version: i64 = change.get("SYS_CHANGE_VERSION");

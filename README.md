@@ -51,6 +51,17 @@ A Rust application that replicates data from a **Primary MSSQL** instance to a *
     
     Check **Replica** (`localhost:1435`) - the `[User]` table will be created and data synced automatically.
 
+## Force Full Re-Sync
+
+To force a full synchronization (TRUNCATE -> FULL LOAD) for a specific table, set a Redis key:
+
+```bash
+# Example: Force reload for 'Product' table
+redis-cli SET mssql_sync:force_full_load:Product "true"
+```
+
+The app will detect this flag, reload the table on the Replica, and automatically remove the key.
+
 ## Architecture
 
 - **Primary**: MSSQL 2022 (Port 1434)
