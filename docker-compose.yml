@@ -48,7 +48,7 @@ services:
       - MSSQL_REPLICA_URL=mssql://sa:Password123!@mssql_replica:1433/testct
       - REDIS_URL=redis://redis:6379
       - SYNC_THREADS=2
-      - RUST_LOG=info
+      - RUST_LOG=error,mssql_sync_app=info
     restart: unless-stopped
 
 volumes:
