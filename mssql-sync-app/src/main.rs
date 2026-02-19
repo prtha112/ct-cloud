@@ -36,18 +36,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Connecting to Redis...");
     let redis_client = Client::open(redis_url)?;
     
-    info!("Starting replication service...");
+    let thread_count = env::var("SYNC_THREADS")
+        .unwrap_or_else(|_| "1".to_string())
+        .parse::<usize>()
+        .unwrap_or(1);
+    
+    info!("Starting replication service with {} threads...", thread_count);
     
     loop {
-        // In a real scenario, you might want to iterate over a list of tables to sync
-        // For this example, let's assume we sync 'Users' table or get list from config
-        // Here we can query tracked tables from Primary
-        
-        // This is a simplified loop. 
-        // We will implement sync for a specific table "Users" first as proof of concept if needed,
-        // or query sys.change_tracking_tables to find all enabled tables.
-        
-        if let Err(e) = sync::run_sync(&primary_pool, &replica_pool, &redis_client).await {
+        if let Err(e) = sync::run_sync(&primary_pool, &replica_pool, &redis_client, thread_count).await {
             error!("Sync error: {}", e);
         }
 

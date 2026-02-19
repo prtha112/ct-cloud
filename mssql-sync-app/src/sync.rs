@@ -7,7 +7,8 @@ use crate::schema;
 pub async fn run_sync(
     primary_pool: &Pool<Mssql>,
     replica_pool: &Pool<Mssql>,
-    redis_client: &Client
+    redis_client: &Client,
+    thread_count: usize
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Get enabled tables
     let tables_query = "
@@ -21,15 +22,51 @@ pub async fn run_sync(
         .fetch_all(primary_pool)
         .await?;
 
-    for table_row in tables {
-        let table_name: String = table_row.get("TableName");
-        debug!("Processing table: {}", table_name);
+    let table_names: Vec<String> = tables.into_iter()
+        .map(|row| row.get("TableName"))
+        .collect();
 
-        // Ensure table exists on Replica
-        schema::ensure_table_exists(primary_pool, replica_pool, &table_name).await?;
+    if table_names.is_empty() {
+        return Ok(());
+    }
 
-        // Sync data
-        sync_table(primary_pool, replica_pool, redis_client, &table_name).await?;
+    let chunk_size = (table_names.len() as f64 / thread_count.max(1) as f64).ceil() as usize;
+    let chunks: Vec<Vec<String>> = table_names.chunks(chunk_size)
+        .map(|c| c.to_vec())
+        .collect();
+
+    let mut handles = Vec::new();
+
+    for chunk in chunks {
+        let p_pool = primary_pool.clone();
+        let r_pool = replica_pool.clone();
+        let r_client = redis_client.clone();
+
+        let handle = tokio::spawn(async move {
+            for table_name in chunk {
+                debug!("Processing table: {}", table_name);
+                
+                // Ensure table exists on Replica
+                schema::ensure_table_exists(&p_pool, &r_pool, &table_name)
+                    .await
+                    .map_err(|e| format!("Schema error on {}: {}", table_name, e))?;
+
+                // Sync data
+                sync_table(&p_pool, &r_pool, &r_client, &table_name)
+                    .await
+                    .map_err(|e| format!("Sync error on {}: {}", table_name, e))?;
+            }
+            Ok::<(), String>(())
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(())) => {},
+            Ok(Err(e)) => return Err(e.into()),
+            Err(e) => return Err(format!("Task join error: {}", e).into()),
+        }
     }
 
     Ok(())
