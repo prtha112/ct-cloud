@@ -17,10 +17,16 @@ pub async fn ensure_table_exists(
 
     // Get column definitions from Primary first
     let columns_query = format!(
-        "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE 
-         FROM INFORMATION_SCHEMA.COLUMNS 
-         WHERE TABLE_NAME = '{}' 
-         ORDER BY ORDINAL_POSITION",
+        "SELECT 
+            c.COLUMN_NAME, 
+            c.DATA_TYPE, 
+            c.CHARACTER_MAXIMUM_LENGTH, 
+            c.IS_NULLABLE,
+            c.COLUMN_DEFAULT,
+            COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') as IsIdentity
+         FROM INFORMATION_SCHEMA.COLUMNS c
+         WHERE c.TABLE_NAME = '{}' 
+         ORDER BY c.ORDINAL_POSITION",
         table_name
     );
 
@@ -43,6 +49,8 @@ pub async fn ensure_table_exists(
             let data_type: String = row.get("DATA_TYPE");
             let max_len: Option<i32> = row.try_get("CHARACTER_MAXIMUM_LENGTH").ok();
             let is_nullable: String = row.get("IS_NULLABLE");
+            let col_default: Option<String> = row.try_get("COLUMN_DEFAULT").ok();
+            let is_identity: Option<i32> = row.try_get("IsIdentity").ok();
 
             if i > 0 {
                 create_sql.push_str(", ");
@@ -58,8 +66,18 @@ pub async fn ensure_table_exists(
                 }
             }
 
+            if let Some(1) = is_identity {
+                create_sql.push_str(" IDENTITY(1,1)");
+            }
+
             if is_nullable == "NO" {
                 create_sql.push_str(" NOT NULL");
+            } else {
+                create_sql.push_str(" NULL");
+            }
+
+            if let Some(def_val) = col_default {
+                create_sql.push_str(&format!(" DEFAULT {}", def_val));
             }
         }
 
@@ -89,27 +107,10 @@ pub async fn ensure_table_exists(
         info!("Executing: {}", create_sql);
         sqlx::query(&create_sql).execute(replica_pool).await?;
         
-        // Enable Change Tracking on the new table in Replica (Optional, usually configured manually or strictly on Primary)
-        // But for Replica to be useful target? No, Replica usually is just standard table.
-        // Wait, current code enables CT on Replica?
-        // Step 206 viewed `schema.rs`. 
-        // Logic: `ALTER TABLE ... ENABLE CHANGE TRACKING`.
-        // If user wants bi-directional or uses replica as source later.
-        // I'll keep it consistent with previous logic if it was there.
-        // Previous logic (from Step 206 snippets): 
-        // `let enable_ct_query = ... execute ...`
-        // Yes, it was there at the end.
-        
         let enable_ct_query = format!(
             "ALTER TABLE [{}] ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = ON)",
             table_name
         );
-        // We use execute but ignore error if CT already enabled or DB not enabled for CT?
-        // Primary DB has CT enabled. Replica DB might need it too if we run this.
-        // User instructions said "Enable Change Tracking on Database" for Primary.
-        // Didn't say for Replica.
-        // But code tries to run it.
-        // I will keep it but wrap in Result Ignore? Or assume user enabled DB CT on Replica too.
         let _ = sqlx::query(&enable_ct_query).execute(replica_pool).await;
 
     } else {
@@ -129,6 +130,8 @@ pub async fn ensure_table_exists(
                let data_type: String = row.get("DATA_TYPE");
                let max_len: Option<i32> = row.try_get("CHARACTER_MAXIMUM_LENGTH").ok();
                let is_nullable: String = row.get("IS_NULLABLE");
+               let col_default: Option<String> = row.try_get("COLUMN_DEFAULT").ok();
+               let is_identity: Option<i32> = row.try_get("IsIdentity").ok();
                
                let mut add_sql = format!("ALTER TABLE [{}] ADD [{}] {}", table_name, col_name, data_type);
                
@@ -139,15 +142,20 @@ pub async fn ensure_table_exists(
                        add_sql.push_str(&format!("({})", len));
                    }
                }
+
+               if let Some(1) = is_identity {
+                   add_sql.push_str(" IDENTITY(1,1)");
+               }
                
-               // Adding NOT NULL to existing table requires default. 
-               // For sync, we skip NOT NULL for added columns to avoid errors, 
-               // UNLESS we want to strict match.
-               // Let's safe skip NOT NULL for added columns for now 
-               // or default to NULLable for safety.
-               // Reason: If table has data, adding NOT NULL fails.
-               // We don't know default value.
-               // So we DON'T add "NOT NULL".
+               if is_nullable == "NO" {
+                   add_sql.push_str(" NOT NULL");
+               } else {
+                   add_sql.push_str(" NULL");
+               }
+               
+               if let Some(def_val) = col_default {
+                   add_sql.push_str(&format!(" DEFAULT {}", def_val));
+               }
                
                info!("Executing: {}", add_sql);
                sqlx::query(&add_sql).execute(replica_pool).await?;
