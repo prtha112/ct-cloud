@@ -1,0 +1,32 @@
+services:
+  mssql_primary:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    container_name: mssql_primary
+    hostname: mssql_primary
+    ports:
+      - "1434:1433" # Primary Port
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=Password123!
+    volumes:
+      - mssql_primary_data:/var/opt/mssql
+    restart: unless-stopped
+
+  mssql_replica:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    container_name: mssql_replica
+    hostname: mssql_replica
+    ports:
+      - "1435:1433" # Replica Port
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=Password123!
+    volumes:
+      - mssql_replica_data:/var/opt/mssql
+    restart: unless-stopped
+
+volumes:
+  mssql_primary_data:
+  mssql_replica_data:
