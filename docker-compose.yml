@@ -27,6 +27,30 @@ services:
       - mssql_replica_data:/var/opt/mssql
     restart: unless-stopped
 
+  redis:
+    image: redis:alpine
+    container_name: redis_sync_state
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  mssql-sync-app:
+    build: ./mssql-sync-app
+    container_name: mssql_sync_app
+    depends_on:
+      - mssql_primary
+      - mssql_replica
+      - redis
+    environment:
+      - MSSQL_PRIMARY_URL=mssql://sa:Password123!@mssql_primary:1433/testct
+      - MSSQL_REPLICA_URL=mssql://sa:Password123!@mssql_replica:1433/testct
+      - REDIS_URL=redis://redis:6379
+      - RUST_LOG=info
+    restart: unless-stopped
+
 volumes:
   mssql_primary_data:
   mssql_replica_data:
+  redis_data:
