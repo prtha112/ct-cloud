@@ -353,5 +353,171 @@ pub async fn ensure_table_exists(
        }
     }
 
+    // Sync schema objects (Indexes, Unique constraints, Foreign keys)
+    sync_schema_objects(primary_pool, replica_pool, table_name).await?;
+
+    Ok(())
+}
+
+pub async fn sync_schema_objects(
+    primary_pool: &Pool<Mssql>,
+    replica_pool: &Pool<Mssql>,
+    table_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Fetch Indexes & Unique Constraints
+    let idx_query = format!(
+        "SELECT 
+            i.name as IndexName, 
+            CAST(i.is_unique AS BIT) as IsUnique,
+            CAST(i.is_unique_constraint AS BIT) as IsUniqueConstraint,
+            i.type_desc as TypeDesc,
+            CAST(STUFF((
+                SELECT ', [' + c.name + ']' + CASE WHEN ic.is_descending_key = 1 THEN ' DESC' ELSE '' END
+                FROM sys.index_columns ic
+                JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id
+                ORDER BY ic.key_ordinal
+                FOR XML PATH('')
+            ), 1, 2, '') AS NVARCHAR(4000)) as Columns
+         FROM sys.indexes i
+         WHERE i.object_id = OBJECT_ID('{}') 
+         AND i.is_primary_key = 0 
+         AND i.type > 0",
+        table_name
+    );
+
+    let p_indexes = sqlx::query(&idx_query).fetch_all(primary_pool).await?;
+    let r_indexes = sqlx::query(&idx_query).fetch_all(replica_pool).await?;
+
+    let p_idx_names: Vec<String> = p_indexes.iter().map(|r| r.get("IndexName")).collect();
+    let r_idx_names: Vec<String> = r_indexes.iter().map(|r| r.get("IndexName")).collect();
+
+    // 2. Fetch Foreign Keys
+    let fk_query = format!(
+        "SELECT 
+            fk.name AS ForeignKeyName,
+            OBJECT_NAME(fk.referenced_object_id) AS ReferencedTableName,
+            CAST(STUFF((
+                SELECT ', [' + c.name + ']'
+                FROM sys.foreign_key_columns fkc
+                JOIN sys.columns c ON fkc.parent_object_id = c.object_id AND fkc.parent_column_id = c.column_id
+                WHERE fkc.constraint_object_id = fk.object_id
+                ORDER BY fkc.constraint_column_id
+                FOR XML PATH('')
+            ), 1, 2, '') AS NVARCHAR(4000)) AS ParentColumns,
+            CAST(STUFF((
+                SELECT ', [' + c.name + ']'
+                FROM sys.foreign_key_columns fkc
+                JOIN sys.columns c ON fkc.referenced_object_id = c.object_id AND fkc.referenced_column_id = c.column_id
+                WHERE fkc.constraint_object_id = fk.object_id
+                ORDER BY fkc.constraint_column_id
+                FOR XML PATH('')
+            ), 1, 2, '') AS NVARCHAR(4000)) AS ReferencedColumns,
+            fk.delete_referential_action_desc AS DeleteAction,
+            fk.update_referential_action_desc AS UpdateAction
+        FROM sys.foreign_keys fk
+        WHERE fk.parent_object_id = OBJECT_ID('{}')",
+        table_name
+    );
+
+    let p_fks = sqlx::query(&fk_query).fetch_all(primary_pool).await?;
+    let r_fks = sqlx::query(&fk_query).fetch_all(replica_pool).await?;
+
+    let p_fk_names: Vec<String> = p_fks.iter().map(|r| r.get("ForeignKeyName")).collect();
+    let r_fk_names: Vec<String> = r_fks.iter().map(|r| r.get("ForeignKeyName")).collect();
+
+    // --- DROP MISSING OBJECTS ---
+    // 3. Drop missing Foreign Keys first (to avoid dependency conflicts on indexes)
+    for r_row in &r_fks {
+        let name: String = r_row.get("ForeignKeyName");
+        if !p_fk_names.contains(&name) {
+            info!("Dropping Foreign Key {} on table {}", name, table_name);
+            let drop_sql = format!("ALTER TABLE [{}] DROP CONSTRAINT [{}]", table_name, name);
+            if let Err(e) = sqlx::query(&drop_sql).execute(replica_pool).await {
+                log::warn!("Failed to drop foreign key {}: {}", name, e);
+            }
+        }
+    }
+
+    // 4. Drop missing Indexes & Constraints
+    for r_row in &r_indexes {
+        let name: String = r_row.get("IndexName");
+        let is_unique_constraint: bool = r_row.get("IsUniqueConstraint");
+        
+        if !p_idx_names.contains(&name) {
+            info!("Dropping index/constraint {} on table {}", name, table_name);
+            let drop_sql = if is_unique_constraint {
+                format!("ALTER TABLE [{}] DROP CONSTRAINT [{}]", table_name, name)
+            } else {
+                format!("DROP INDEX [{}] ON [{}]", name, table_name)
+            };
+            if let Err(e) = sqlx::query(&drop_sql).execute(replica_pool).await {
+                log::warn!("Failed to drop index/constraint {}: {}", name, e);
+            }
+        }
+    }
+
+    // --- CREATE MISSING OBJECTS ---
+    // 5. Create missing Indexes / Unique Constraints
+    for p_row in &p_indexes {
+        let name: String = p_row.get("IndexName");
+        let is_unique: bool = p_row.get("IsUnique");
+        let is_unique_constraint: bool = p_row.get("IsUniqueConstraint");
+        let columns: Option<String> = p_row.try_get("Columns").ok();
+
+        if !r_idx_names.contains(&name) {
+            if let Some(cols) = columns {
+                info!("Creating index/constraint {} on table {}", name, table_name);
+                let create_sql = if is_unique_constraint {
+                    format!("ALTER TABLE [{}] ADD CONSTRAINT [{}] UNIQUE ({})", table_name, name, cols)
+                } else {
+                    let unique_str = if is_unique { "UNIQUE " } else { "" };
+                    format!("CREATE {}INDEX [{}] ON [{}] ({})", unique_str, name, table_name, cols)
+                };
+
+                if let Err(e) = sqlx::query(&create_sql).execute(replica_pool).await {
+                    log::warn!("Failed to create index {}: {}", name, e);
+                }
+            }
+        }
+    }
+
+    // 6. Create missing Foreign Keys
+    for p_row in &p_fks {
+        let name: String = p_row.get("ForeignKeyName");
+        let ref_table: Option<String> = p_row.try_get("ReferencedTableName").ok();
+        let p_cols: Option<String> = p_row.try_get("ParentColumns").ok();
+        let r_cols: Option<String> = p_row.try_get("ReferencedColumns").ok();
+        let del_action: Option<String> = p_row.try_get("DeleteAction").ok();
+        let upd_action: Option<String> = p_row.try_get("UpdateAction").ok();
+
+        if !r_fk_names.contains(&name) {
+            if let (Some(rt), Some(pc), Some(rc)) = (ref_table, p_cols, r_cols) {
+                info!("Creating Foreign Key {} on table {}", name, table_name);
+                let mut create_sql = format!(
+                    "ALTER TABLE [{}] ADD CONSTRAINT [{}] FOREIGN KEY ({}) REFERENCES [{}] ({})",
+                    table_name, name, pc, rt, rc
+                );
+
+                if let Some(da) = del_action {
+                    let da_str = da.replace("_", " ");
+                    if da_str != "NO ACTION" {
+                        create_sql.push_str(&format!(" ON DELETE {}", da_str));
+                    }
+                }
+                if let Some(ua) = upd_action {
+                    let ua_str = ua.replace("_", " ");
+                    if ua_str != "NO ACTION" {
+                        create_sql.push_str(&format!(" ON UPDATE {}", ua_str));
+                    }
+                }
+
+                if let Err(e) = sqlx::query(&create_sql).execute(replica_pool).await {
+                    log::warn!("Failed to create foreign key {} (referenced table might not exist yet): {}", name, e);
+                }
+            }
+        }
+    }
+
     Ok(())
 }
