@@ -27,3 +27,18 @@ pub async fn clear_force_full_load(client: &Client, table_name: &str) -> RedisRe
     let _: () = con.del(key)?;
     Ok(())
 }
+
+pub async fn init_table_enabled(client: &Client, table_name: &str) -> RedisResult<()> {
+    let mut con = client.get_connection()?;
+    let key = format!("mssql_sync:enabled:{}", table_name);
+    // SETNX will only set the key if it does not already exist
+    let _: () = redis::cmd("SETNX").arg(key).arg("false").query(&mut con)?;
+    Ok(())
+}
+
+pub async fn is_table_enabled(client: &Client, table_name: &str) -> RedisResult<bool> {
+    let mut con = client.get_connection()?;
+    let key = format!("mssql_sync:enabled:{}", table_name);
+    let enabled_str: Option<String> = con.get(key)?;
+    Ok(enabled_str.as_deref() == Some("true"))
+}

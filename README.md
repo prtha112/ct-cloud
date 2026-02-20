@@ -49,7 +49,19 @@ A Rust application that replicates data from a **Primary MSSQL** instance to a *
     INSERT INTO [User] (id, username, email) VALUES (1, 'alice', 'alice@example.com');
     ```
     
-    Check **Replica** (`localhost:1435`) - the `[User]` table will be created and data synced automatically.
+    By default, synchronization is paused. You must enable it in Redis to see the data on the **Replica** (`localhost:1435`):
+    ```bash
+    # Enable synchronization for the 'User' table
+    docker exec redis_sync_state redis-cli SET mssql_sync:enabled:User "true"
+    ```
+
+## Enable Table Synchronization
+
+By default, any new table discovered with Change Tracking enabled will be paused. To start schema creation and data replication for a specific table, you must set its flag in Redis:
+
+```bash
+docker exec redis_sync_state redis-cli SET mssql_sync:enabled:TableName "true"
+```
 
 ## Force Full Re-Sync
 

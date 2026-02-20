@@ -46,6 +46,19 @@ pub async fn run_sync(
         let handle = tokio::spawn(async move {
             for table_name in chunk {
                 debug!("Processing table: {}", table_name);
+
+                // 1. Initialize enabled flag in Redis if it doesn't exist
+                if let Err(e) = state::init_table_enabled(&r_client, &table_name).await {
+                    log::error!("Failed to initialize enabled flag for {}: {}", table_name, e);
+                    continue;
+                }
+
+                // 2. Check if table synchronization is enabled
+                let is_enabled = state::is_table_enabled(&r_client, &table_name).await.unwrap_or(false);
+                if !is_enabled {
+                    info!("Sync skipped for table: {} (mssql_sync:enabled:{} is not true)", table_name, table_name);
+                    continue;
+                }
                 
                 // Ensure table exists on Replica
                 schema::ensure_table_exists(&p_pool, &r_pool, &table_name)
