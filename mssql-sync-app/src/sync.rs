@@ -160,47 +160,78 @@ async fn sync_table(
         let truncate_sql = format!("TRUNCATE TABLE [{}]", table_name);
         sqlx::query(&truncate_sql).execute(replica_pool).await?;
         
-        // 2. Initial Full Load (SELECT * FROM Primary)
-        let full_query = format!("SELECT {} FROM [{}]", select_list, table_name);
-        let rows = sqlx::query(&full_query).fetch_all(primary_pool).await?; 
+        // Find column for ORDER BY (required for OFFSET)
+        let pk_col_query = format!(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
+             WHERE OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_SCHEMA + '.' + CONSTRAINT_NAME), 'IsPrimaryKey') = 1 
+             AND TABLE_NAME = '{}'", 
+            table_name
+        );
+        let pk_row = sqlx::query(&pk_col_query).fetch_optional(primary_pool).await?;
+        let order_col = match pk_row {
+            Some(row) => row.get::<String, _>("COLUMN_NAME"),
+            None => columns[0].0.clone(), // Fallback to first column
+        };
+
+        // 2. Chunked Full Load
+        let chunk_size = 5000;
+        let mut offset = 0;
+        let mut total_inserted = 0;
         
-        info!("Force Load: Inserting {} rows into {}", rows.len(), table_name);
-        
-        for row in rows {
-            // Build INSERT
-             let mut cols = Vec::new();
-             let mut placeholders = Vec::new();
+        loop {
+            let full_query = format!(
+                "SELECT {} FROM [{}] ORDER BY [{}] OFFSET {} ROWS FETCH NEXT {} ROWS ONLY", 
+                select_list, table_name, order_col, offset, chunk_size
+            );
+            
+            let rows = sqlx::query(&full_query).fetch_all(primary_pool).await?; 
+            let row_count = rows.len();
+            
+            if row_count == 0 {
+                break;
+            }
+            
+            for row in rows {
+                 // Build INSERT
+                 let mut cols = Vec::new();
+                 let mut placeholders = Vec::new();
 
-             for col in row.columns() {
-                 let name = col.name();
-                 cols.push(format!("[{}]", name));
-                 placeholders.push(format!("@p{}", cols.len()));
-             }
+                 for col in row.columns() {
+                     let name = col.name();
+                     cols.push(format!("[{}]", name));
+                     placeholders.push(format!("@p{}", cols.len()));
+                 }
 
-             let insert_sql = if has_identity {
-                 format!(
-                     "SET IDENTITY_INSERT [{}] ON; INSERT INTO [{}] ({}) VALUES ({}); SET IDENTITY_INSERT [{}] OFF;",
-                     table_name, table_name, cols.join(", "), placeholders.join(", "), table_name
-                 )
-             } else {
-                 format!(
-                     "INSERT INTO [{}] ({}) VALUES ({})",
-                     table_name, cols.join(", "), placeholders.join(", ")
-                 )
-             };
+                 let insert_sql = if has_identity {
+                     format!(
+                         "SET IDENTITY_INSERT [{}] ON; INSERT INTO [{}] ({}) VALUES ({}); SET IDENTITY_INSERT [{}] OFF;",
+                         table_name, table_name, cols.join(", "), placeholders.join(", "), table_name
+                     )
+                 } else {
+                     format!(
+                         "INSERT INTO [{}] ({}) VALUES ({})",
+                         table_name, cols.join(", "), placeholders.join(", ")
+                     )
+                 };
 
-             let mut query_builder = sqlx::query(&insert_sql);
-             
-             let mut bound_values_str = String::new();
-             // Bind values (All fields are dynamically converted to String via select_list to avoid driver decode strictness)
-             for col in row.columns() {
-                  let v: Option<String> = row.try_get(col.ordinal()).ok();
-                  bound_values_str.push_str(&format!("{}={:?}, ", col.name(), v));
-                  query_builder = query_builder.bind(v);
-             }
-             log::info!("Full Load Insert -> {}", bound_values_str);
-             
-             query_builder.execute(replica_pool).await?;
+                 let mut query_builder = sqlx::query(&insert_sql);
+                 
+                 for col in row.columns() {
+                      let v: Option<String> = row.try_get(col.ordinal()).ok();
+                      query_builder = query_builder.bind(v);
+                 }
+                 
+                 query_builder.execute(replica_pool).await?;
+            }
+            
+            total_inserted += row_count;
+            info!("Force Load Chunk: Table {} - Inserted {}/{} total rows", table_name, row_count, total_inserted);
+            
+            offset += chunk_size;
+            
+            if row_count < chunk_size {
+                break;
+            }
         }
         
         // 3. Update Sync Version
@@ -209,10 +240,11 @@ async fn sync_table(
         // 4. Clear Flag
         state::clear_force_full_load(redis_client, table_name).await?;
         
-        info!("Force Full Load complete for table: {}", table_name);
+        info!("Force Full Load complete for table: {} (Total: {})", table_name, total_inserted);
         return Ok(());
     }
     // -----------------------------
+
 
     info!("Syncing {} from v{} to v{}", table_name, last_version, current_version);
 
