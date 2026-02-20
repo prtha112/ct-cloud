@@ -69,10 +69,13 @@ To force a full synchronization (TRUNCATE -> FULL LOAD) for a specific table, se
 
 ```bash
 # Example: Force reload for 'Product' table
-redis-cli SET mssql_sync:force_full_load:Product "true"
+docker exec redis_sync_state redis-cli SET mssql_sync:force_full_load:Product "true"
 ```
 
-The app will detect this flag, reload the table on the Replica, and automatically remove the key.
+The app will detect this flag, reload the table on the Replica, and automatically remove the key when finished.
+
+> **Note on Large Tables (Chunked Sync):** 
+> To prevent `Out of Memory` errors when syncing tables with millions of rows, the Full Re-Sync feature uses **Keyset Pagination**. It automatically detects the table's Primary Key (or falls back to the first column) and fetches records in chunks of 5,000 rows at a time until the entire table is seamlessly replicated.
 
 ## Architecture
 
