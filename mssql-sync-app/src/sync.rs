@@ -108,10 +108,13 @@ async fn sync_table(
         .await?;
         
     let select_list = columns.iter().map(|(name, dtype)| {
-        if ["decimal", "numeric", "money", "smallmoney", "float", "real"].contains(&dtype.as_str()) {
+        if ["decimal", "numeric", "money", "smallmoney", "float", "real"].contains(&dtype.to_lowercase().as_str()) {
              // Cast to string to safely transport through sqlx (avoid NumericN panic)
-             // VARCHAR(MAX) fits any number representation
-             format!("CAST([{}] AS VARCHAR(MAX)) AS [{}]", name, name) 
+             // VARCHAR(100) fits any number representation and avoids sqlx LOB stream parsing bugs
+             format!("CAST([{}] AS VARCHAR(100)) AS [{}]", name, name) 
+        } else if ["datetime", "datetime2", "date", "time", "smalldatetime", "datetimeoffset"].contains(&dtype.to_lowercase().as_str()) {
+             // Cast to string to safely transport through sqlx (avoid DateTimeN panic)
+             format!("CONVERT(VARCHAR(100), [{}], 126) AS [{}]", name, name)
         } else {
              format!("[{}]", name)
         }
@@ -152,20 +155,25 @@ async fn sync_table(
 
              let mut query_builder = sqlx::query(&insert_sql);
              
+             let mut bound_values_str = String::new();
              // Bind values
              for col in row.columns() {
                  let type_name = col.type_info().name();
                  if type_name == "INT" || type_name == "INTEGER" {
                       let v: Option<i32> = row.try_get(col.ordinal()).ok();
+                      bound_values_str.push_str(&format!("{}={:?}, ", col.name(), v));
                       query_builder = query_builder.bind(v);
                  } else if type_name == "BIGINT" {
                       let v: Option<i64> = row.try_get(col.ordinal()).ok();
+                      bound_values_str.push_str(&format!("{}={:?}, ", col.name(), v));
                       query_builder = query_builder.bind(v);
                  } else {
                       let v: Option<String> = row.try_get(col.ordinal()).ok();
+                      bound_values_str.push_str(&format!("{}={:?}, ", col.name(), v));
                       query_builder = query_builder.bind(v);
                  }
              }
+             log::info!("Full Load Insert -> {}", bound_values_str);
              
              query_builder.execute(replica_pool).await?;
         }
