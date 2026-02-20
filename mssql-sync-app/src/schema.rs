@@ -25,6 +25,7 @@ pub async fn ensure_table_exists(
             c.COLUMN_DEFAULT,
             c.NUMERIC_PRECISION,
             c.NUMERIC_SCALE,
+            c.DATETIME_PRECISION,
             COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') as IsIdentity
          FROM INFORMATION_SCHEMA.COLUMNS c
          WHERE c.TABLE_NAME = '{}' 
@@ -53,6 +54,7 @@ pub async fn ensure_table_exists(
             let is_nullable: String = row.get("IS_NULLABLE");
             let col_default: Option<String> = row.try_get("COLUMN_DEFAULT").ok();
             let is_identity: Option<i32> = row.try_get("IsIdentity").ok();
+            let dt_prec: Option<i16> = row.try_get("DATETIME_PRECISION").ok();
 
             if i > 0 {
                 create_sql.push_str(", ");
@@ -65,6 +67,10 @@ pub async fn ensure_table_exists(
                     create_sql.push_str("(MAX)");
                 } else if data_type == "nvarchar" || data_type == "varchar" || data_type == "varbinary" {
                     create_sql.push_str(&format!("({})", len));
+                }
+            } else if ["datetime2", "datetimeoffset", "time"].contains(&data_type.as_str()) {
+                if let Some(prec) = dt_prec {
+                    create_sql.push_str(&format!("({})", prec));
                 }
             }
 
@@ -125,7 +131,8 @@ pub async fn ensure_table_exists(
                IS_NULLABLE, 
                COLUMN_DEFAULT,
                NUMERIC_PRECISION,
-               NUMERIC_SCALE
+               NUMERIC_SCALE,
+               DATETIME_PRECISION
             FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{}'",
            table_name
        );
@@ -146,6 +153,7 @@ pub async fn ensure_table_exists(
                let is_identity: Option<i32> = row.try_get("IsIdentity").ok();
                let numeric_precision: Option<u8> = row.try_get("NUMERIC_PRECISION").ok();
                let numeric_scale: Option<i32> = row.try_get("NUMERIC_SCALE").ok();
+               let dt_prec: Option<i16> = row.try_get("DATETIME_PRECISION").ok();
                
                let mut add_sql = format!("ALTER TABLE [{}] ADD [{}] {}", table_name, col_name, data_type);
                
@@ -158,6 +166,10 @@ pub async fn ensure_table_exists(
                        add_sql.push_str("(MAX)");
                    } else if ["nvarchar", "varchar", "varbinary", "char", "nchar"].contains(&data_type.as_str()) {
                        add_sql.push_str(&format!("({})", len));
+                   }
+               } else if ["datetime2", "datetimeoffset", "time"].contains(&data_type.as_str()) {
+                   if let Some(prec) = dt_prec {
+                       add_sql.push_str(&format!("({})", prec));
                    }
                }
 
@@ -187,12 +199,14 @@ pub async fn ensure_table_exists(
                let p_null: String = row.get("IS_NULLABLE");
                let p_prec: Option<u8> = row.try_get("NUMERIC_PRECISION").ok();
                let p_scale: Option<i32> = row.try_get("NUMERIC_SCALE").ok();
+               let p_dt_prec: Option<i16> = row.try_get("DATETIME_PRECISION").ok();
                
                let r_type: String = rep_row.get("DATA_TYPE");
                let r_len: Option<i32> = rep_row.try_get("CHARACTER_MAXIMUM_LENGTH").ok();
                let r_null: String = rep_row.get("IS_NULLABLE");
                let r_prec: Option<u8> = rep_row.try_get("NUMERIC_PRECISION").ok();
                let r_scale: Option<i32> = rep_row.try_get("NUMERIC_SCALE").ok();
+               let r_dt_prec: Option<i16> = rep_row.try_get("DATETIME_PRECISION").ok();
                
                let mut properties_changed = false;
                
@@ -201,6 +215,8 @@ pub async fn ensure_table_exists(
                } else if ["nvarchar", "varchar", "varbinary", "char", "nchar"].contains(&p_type.as_str()) && p_len != r_len {
                    properties_changed = true;
                } else if (p_type == "decimal" || p_type == "numeric") && (p_prec != r_prec || p_scale != r_scale) {
+                   properties_changed = true;
+               } else if ["datetime2", "datetimeoffset", "time"].contains(&p_type.as_str()) && p_dt_prec != r_dt_prec {
                    properties_changed = true;
                } else if p_null != r_null {
                    properties_changed = true;
@@ -237,6 +253,10 @@ pub async fn ensure_table_exists(
                            alter_sql.push_str("(MAX)");
                        } else if ["nvarchar", "varchar", "varbinary", "char", "nchar"].contains(&p_type.as_str()) {
                            alter_sql.push_str(&format!("({})", len));
+                       }
+                   } else if ["datetime2", "datetimeoffset", "time"].contains(&p_type.as_str()) {
+                       if let Some(prec) = p_dt_prec {
+                           alter_sql.push_str(&format!("({})", prec));
                        }
                    }
 

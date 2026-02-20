@@ -121,18 +121,36 @@ async fn sync_table(
         .await?;
         
     let select_list = columns.iter().map(|(name, dtype)| {
-        if ["decimal", "numeric", "money", "smallmoney", "float", "real"].contains(&dtype.to_lowercase().as_str()) {
-             // Cast to string to safely transport through sqlx (avoid NumericN panic)
+        if ["decimal", "numeric", "money", "smallmoney", "float", "real", "tinyint", "smallint", "int", "bigint", "bit"].contains(&dtype.to_lowercase().as_str()) {
+             // Cast to string to safely transport through sqlx (avoid NumericN panic and SQLx strict decoding panics)
              // VARCHAR(100) fits any number representation and avoids sqlx LOB stream parsing bugs
              format!("CAST([{}] AS VARCHAR(100)) AS [{}]", name, name) 
         } else if ["datetime", "datetime2", "date", "time", "smalldatetime", "datetimeoffset"].contains(&dtype.to_lowercase().as_str()) {
              // Cast to string to safely transport through sqlx (avoid DateTimeN panic)
              format!("CONVERT(VARCHAR(100), [{}], 126) AS [{}]", name, name)
+        } else if ["text"].contains(&dtype.to_lowercase().as_str()) {
+             // Cast deprecated text to VARCHAR(8000) to avoid unsupported data type Text panic
+             // and avoid VARCHAR(MAX) which triggers sqlx LOB stream parsing bugs
+             format!("CAST([{}] AS VARCHAR(8000)) AS [{}]", name, name)
+        } else if ["ntext"].contains(&dtype.to_lowercase().as_str()) {
+             // Cast deprecated ntext to NVARCHAR(4000) to avoid unsupported data type NText panic
+             // and avoid NVARCHAR(MAX) which triggers sqlx LOB stream parsing bugs
+             format!("CAST([{}] AS NVARCHAR(4000)) AS [{}]", name, name)
         } else {
              format!("[{}]", name)
         }
     }).collect::<Vec<_>>().join(", ");
 
+
+    // --- IDENTITY CHECK ---
+    let identity_check_query = format!(
+        "SELECT OBJECTPROPERTY(OBJECT_ID('{}'), 'TableHasIdentity')",
+        table_name
+    );
+    let has_identity_val: Option<i32> = sqlx::query_scalar(&identity_check_query)
+        .fetch_optional(primary_pool)
+        .await?;
+    let has_identity = has_identity_val.unwrap_or(0) == 1;
 
     // --- FORCE FULL LOAD LOGIC ---
     if force_full_load {
@@ -159,32 +177,26 @@ async fn sync_table(
                  placeholders.push(format!("@p{}", cols.len()));
              }
 
-             let insert_sql = format!(
-                 "INSERT INTO [{}] ({}) VALUES ({})",
-                 table_name,
-                 cols.join(", "),
-                 placeholders.join(", ")
-             );
+             let insert_sql = if has_identity {
+                 format!(
+                     "SET IDENTITY_INSERT [{}] ON; INSERT INTO [{}] ({}) VALUES ({}); SET IDENTITY_INSERT [{}] OFF;",
+                     table_name, table_name, cols.join(", "), placeholders.join(", "), table_name
+                 )
+             } else {
+                 format!(
+                     "INSERT INTO [{}] ({}) VALUES ({})",
+                     table_name, cols.join(", "), placeholders.join(", ")
+                 )
+             };
 
              let mut query_builder = sqlx::query(&insert_sql);
              
              let mut bound_values_str = String::new();
-             // Bind values
+             // Bind values (All fields are dynamically converted to String via select_list to avoid driver decode strictness)
              for col in row.columns() {
-                 let type_name = col.type_info().name();
-                 if type_name == "INT" || type_name == "INTEGER" {
-                      let v: Option<i32> = row.try_get(col.ordinal()).ok();
-                      bound_values_str.push_str(&format!("{}={:?}, ", col.name(), v));
-                      query_builder = query_builder.bind(v);
-                 } else if type_name == "BIGINT" {
-                      let v: Option<i64> = row.try_get(col.ordinal()).ok();
-                      bound_values_str.push_str(&format!("{}={:?}, ", col.name(), v));
-                      query_builder = query_builder.bind(v);
-                 } else {
-                      let v: Option<String> = row.try_get(col.ordinal()).ok();
-                      bound_values_str.push_str(&format!("{}={:?}, ", col.name(), v));
-                      query_builder = query_builder.bind(v);
-                 }
+                  let v: Option<String> = row.try_get(col.ordinal()).ok();
+                  bound_values_str.push_str(&format!("{}={:?}, ", col.name(), v));
+                  query_builder = query_builder.bind(v);
              }
              log::info!("Full Load Insert -> {}", bound_values_str);
              
@@ -221,7 +233,7 @@ async fn sync_table(
         "SELECT 
             ct.SYS_CHANGE_VERSION,
             ct.SYS_CHANGE_OPERATION,
-            ct.{} -- PK
+            CAST(ct.[{}] AS NVARCHAR(4000)) AS pk_val_str
          FROM CHANGETABLE(CHANGES dbo.[{}], @p1) AS ct
          ORDER BY ct.SYS_CHANGE_VERSION",
         pk_col, table_name
@@ -235,23 +247,23 @@ async fn sync_table(
     for change in &changes {
         let _version: i64 = change.get("SYS_CHANGE_VERSION");
         let op: String = change.get("SYS_CHANGE_OPERATION");
-        let pk_val: i64 = change.get(pk_col.as_str()); 
+        let pk_val_str: String = change.get("pk_val_str"); 
 
         match op.as_str() {
             "D" => {
                 // Delete in Replica
                 let del_sql = format!("DELETE FROM [{}] WHERE [{}] = @p1", table_name, pk_col);
-                sqlx::query(&del_sql).bind(pk_val).execute(replica_pool).await?;
+                sqlx::query(&del_sql).bind(&pk_val_str).execute(replica_pool).await?;
             },
             "I" | "U" => {
                 // Fetch full row from Primary using safe SELECT list
                 let row_query = format!("SELECT {} FROM [{}] WHERE [{}] = @p1", select_list, table_name, pk_col);
-                let row_opt = sqlx::query(&row_query).bind(pk_val).fetch_optional(primary_pool).await?;
+                let row_opt = sqlx::query(&row_query).bind(&pk_val_str).fetch_optional(primary_pool).await?;
                 
                 if let Some(row) = row_opt {
                     // UPSERT into Replica
                     let del_sql = format!("DELETE FROM [{}] WHERE [{}] = @p1", table_name, pk_col);
-                    sqlx::query(&del_sql).bind(pk_val).execute(replica_pool).await?;
+                    sqlx::query(&del_sql).bind(&pk_val_str).execute(replica_pool).await?;
 
                     // Build INSERT
                     let mut cols = Vec::new();
@@ -263,29 +275,24 @@ async fn sync_table(
                         placeholders.push(format!("@p{}", cols.len()));
                     }
 
-                    let insert_sql = format!(
-                        "INSERT INTO [{}] ({}) VALUES ({})",
-                        table_name,
-                        cols.join(", "),
-                        placeholders.join(", ")
-                    );
+                    let insert_sql = if has_identity {
+                        format!(
+                            "SET IDENTITY_INSERT [{}] ON; INSERT INTO [{}] ({}) VALUES ({}); SET IDENTITY_INSERT [{}] OFF;",
+                            table_name, table_name, cols.join(", "), placeholders.join(", "), table_name
+                        )
+                    } else {
+                        format!(
+                            "INSERT INTO [{}] ({}) VALUES ({})",
+                            table_name, cols.join(", "), placeholders.join(", ")
+                        )
+                    };
 
                     let mut query_builder = sqlx::query(&insert_sql);
                     
-                    // Bind values
+                    // Bind values (All fields are dynamically converted to String via select_list to avoid driver decode strictness)
                     for col in row.columns() {
-                        let type_name = col.type_info().name();
-                        if type_name == "INT" || type_name == "INTEGER" {
-                             let v: Option<i32> = row.try_get(col.ordinal()).ok();
-                             query_builder = query_builder.bind(v);
-                        } else if type_name == "BIGINT" {
-                             let v: Option<i64> = row.try_get(col.ordinal()).ok();
-                             query_builder = query_builder.bind(v);
-                        } else {
-                             // Fallback to string for everything else (including CASTed decimals)
-                             let v: Option<String> = row.try_get(col.ordinal()).ok();
-                             query_builder = query_builder.bind(v);
-                        }
+                         let v: Option<String> = row.try_get(col.ordinal()).ok();
+                         query_builder = query_builder.bind(v);
                     }
                     
                     query_builder.execute(replica_pool).await?;
