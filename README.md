@@ -1,5 +1,7 @@
 # MSSQL Change Tracking Replication (Rust)
 
+![Dashboard UI Preview](./ui.png)
+
 A Rust application that replicates data from a **Primary MSSQL** instance to a **Replica MSSQL** instance using **Change Tracking**. Synchronization state is managed via **Redis**.
 
 ## Prerequisites
