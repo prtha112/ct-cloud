@@ -51,6 +51,18 @@ services:
       - RUST_LOG=error,mssql_sync_app=info
     restart: unless-stopped
 
+  frontend:
+    build:
+      context: ./frontend
+    container_name: mssql_sync_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    restart: unless-stopped
+
 volumes:
   mssql_primary_data:
   mssql_replica_data:
