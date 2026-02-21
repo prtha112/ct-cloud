@@ -112,7 +112,7 @@ export default function Dashboard() {
               <ServerCog className="w-5 h-5 text-blue-400" />
             </div>
             <div>
-              <h1 className="text-lg font-medium text-white tracking-tight">MSSQL Sync Controller</h1>
+              <h1 className="text-lg font-medium text-white tracking-tight">CT-Cloud MSSQL Sync Controller</h1>
 
               {/* Database Connection Flow Indicator */}
               {config && (
