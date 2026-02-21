@@ -1,0 +1,28 @@
+name: Test Docker Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    name: Build mssql-sync-app Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./mssql-sync-app
+          push: false
+          tags: mssql-sync-app:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
