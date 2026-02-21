@@ -18,6 +18,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("MSSQL_PRIMARY_URL must be set");
     let replica_url = env::var("MSSQL_REPLICA_URL")
         .expect("MSSQL_REPLICA_URL must be set");
+        
+    if primary_url == replica_url {
+        panic!("MSSQL_PRIMARY_URL and MSSQL_REPLICA_URL cannot be the same!");
+    }
+
     let redis_url = env::var("REDIS_URL")
         .expect("REDIS_URL must be set");
 

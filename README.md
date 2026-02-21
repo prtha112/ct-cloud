@@ -63,16 +63,23 @@ By default, any new table discovered with Change Tracking enabled will be paused
 docker exec redis_sync_state redis-cli SET mssql_sync:enabled:TableName "true"
 ```
 
-## Force Full Re-Sync
+## Force Full Re-Sync/Deploying to Production
 
-To force a full synchronization (TRUNCATE -> FULL LOAD) for a specific table, set a Redis key:
+When deploying this application to a real production database where Change Tracking has been running for a long time, the app should **not** replay the entire history from version 0. Instead, you should use the Force Full Load feature table by table to snapshot the current state.
 
-```bash
-# Example: Force reload for 'Product' table
-docker exec redis_sync_state redis-cli SET mssql_sync:force_full_load:Product "true"
-```
-
-The app will detect this flag, reload the table on the Replica, and automatically remove the key when finished.
+1. **Start the App:** Once running, the app creates schema clones on the replica but sets all synchronization (`mssql_sync:enabled:[Table]` and `mssql_sync:force_full_load:[Table]`) to `"false"` by default.
+2. **Force Full Load (Small/Medium Tables):** 
+   Set the `force_full_load` flag to `"true"`, followed by setting `enabled` to `"true"`. The app will truncate the replica table, chunk-insert all current data, and seamlessly transition into incremental sync for future changes while resetting the `force_full_load` flag back to `"false"`.
+   ```bash
+   docker exec redis_sync_state redis-cli SET mssql_sync:force_full_load:Product "true"
+   docker exec redis_sync_state redis-cli SET mssql_sync:enabled:Product "true"
+   ```
+3. **Huge Tables (Manual Snapshot):** 
+   For extremely large tables, avoid querying the entire table via the app. Instead, perform a manual backup/restore to the Replica. Note the `CHANGE_TRACKING_CURRENT_VERSION()` from the Primary at the time of backup, and manually set it in Redis:
+   ```bash
+   docker exec redis_sync_state redis-cli SET mssql_sync:version:HugeTable "850550"
+   docker exec redis_sync_state redis-cli SET mssql_sync:enabled:HugeTable "true"
+   ```
 
 > **Note on Large Tables (Chunked Sync):** 
 > To prevent `Out of Memory` errors when syncing tables with millions of rows, the Full Re-Sync feature uses **Keyset Pagination**. It automatically detects the table's Primary Key (or falls back to the first column) and fetches records in chunks of 5,000 rows at a time until the entire table is seamlessly replicated.
