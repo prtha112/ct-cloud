@@ -40,6 +40,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Connecting to Redis...");
     let redis_client = Client::open(redis_url)?;
+
+    // Save sanitized config to Redis for the Frontend to display
+    // E.g. mssql://sa:Password123!@localhost:1433/testct -> mssql://localhost:1433/testct
+    let sanitize_url = |url: &str| -> String {
+        if let Some(at_idx) = url.find('@') {
+            if let Some(protocol_idx) = url.find("://") {
+                let protocol = &url[0..protocol_idx + 3];
+                let rest = &url[at_idx + 1..];
+                return format!("{}{}", protocol, rest);
+            }
+        }
+        url.to_string()
+    };
+
+    let safe_primary = sanitize_url(&primary_url);
+    let safe_replica = sanitize_url(&replica_url);
+    
+    if let Err(e) = state::set_config(&redis_client, "primary_url", &safe_primary).await {
+        error!("Failed to save primary config to Redis: {}", e);
+    }
+    if let Err(e) = state::set_config(&redis_client, "replica_url", &safe_replica).await {
+        error!("Failed to save replica config to Redis: {}", e);
+    }
     
     let thread_count = env::var("SYNC_THREADS")
         .unwrap_or_else(|_| "1".to_string())

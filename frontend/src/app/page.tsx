@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Database, RefreshCw, AlertCircle, CheckCircle2, ServerCog, PlaySquare, ToggleLeft, ToggleRight } from "lucide-react";
+import { Database, RefreshCw, AlertCircle, CheckCircle2, ServerCog, PlaySquare, ToggleLeft, ToggleRight, ArrowRight } from "lucide-react";
 
 interface TableSyncState {
   id: string;
@@ -11,8 +11,14 @@ interface TableSyncState {
   version: number;
 }
 
+interface AppConfig {
+  primaryUrl: string;
+  replicaUrl: string;
+}
+
 export default function Dashboard() {
   const [tables, setTables] = useState<TableSyncState[]>([]);
+  const [config, setConfig] = useState<AppConfig | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actingOn, setActingOn] = useState<string | null>(null);
@@ -32,7 +38,20 @@ export default function Dashboard() {
     }
   };
 
+  const fetchConfig = async () => {
+    try {
+      const res = await fetch("/api/config");
+      if (res.ok) {
+        const data = await res.json();
+        setConfig(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch config", err);
+    }
+  };
+
   useEffect(() => {
+    fetchConfig();
     fetchTables();
     // Auto refresh every 5 seconds to get live status
     const interval = setInterval(fetchTables, 5000);
@@ -87,13 +106,37 @@ export default function Dashboard() {
 
       {/* Header */}
       <header className="border-b border-neutral-800 bg-neutral-900/50 backdrop-blur-xl sticky top-0 z-10">
-        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center space-x-3">
             <div className="bg-blue-500/10 p-2 rounded-lg border border-blue-500/20">
               <ServerCog className="w-5 h-5 text-blue-400" />
             </div>
-            <h1 className="text-lg font-medium text-white tracking-tight">MSSQL Sync Controller</h1>
+            <div>
+              <h1 className="text-lg font-medium text-white tracking-tight">MSSQL Sync Controller</h1>
+
+              {/* Database Connection Flow Indicator */}
+              {config && (
+                <div className="flex flex-col md:flex-row md:items-center mt-1 text-xs font-mono text-neutral-400 gap-1.5 md:gap-3">
+                  <div className="flex items-center space-x-1.5 bg-neutral-900 border border-neutral-800 rounded-md px-2 py-0.5">
+                    <Database className="w-3 h-3 text-neutral-500" />
+                    <span className="truncate max-w-[150px] md:max-w-xs" title={config.primaryUrl}>
+                      {config.primaryUrl.replace("mssql://", "")}
+                    </span>
+                  </div>
+
+                  <ArrowRight className="w-3.5 h-3.5 text-neutral-600 hidden md:block" />
+
+                  <div className="flex items-center space-x-1.5 bg-neutral-900 border border-neutral-800 rounded-md px-2 py-0.5">
+                    <Database className="w-3 h-3 text-neutral-500" />
+                    <span className="truncate max-w-[150px] md:max-w-xs" title={config.replicaUrl}>
+                      {config.replicaUrl.replace("mssql://", "")}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
+
           <div className="flex items-center space-x-2 text-sm text-neutral-400">
             <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]"></div>
             <span className="animate-pulse duration-1000">Live Sync Active</span>
@@ -152,8 +195,8 @@ export default function Dashboard() {
                   {/* Table Name */}
                   <div className="col-span-1 md:col-span-5 flex items-center space-x-3">
                     <div className={`w-8 h-8 rounded-full flex shrink-0 items-center justify-center border ${table.enabled
-                        ? 'bg-blue-500/10 border-blue-500/20 text-blue-400'
-                        : 'bg-neutral-800/50 border-neutral-700 text-neutral-500'
+                      ? 'bg-blue-500/10 border-blue-500/20 text-blue-400'
+                      : 'bg-neutral-800/50 border-neutral-700 text-neutral-500'
                       }`}>
                       <Database className="w-4 h-4" />
                     </div>
@@ -182,8 +225,8 @@ export default function Dashboard() {
                       disabled={actingOn === table.id}
                       title={table.enabled ? "Disable Sync" : "Enable Sync"}
                       className={`relative inline-flex items-center transition-all ${table.enabled
-                          ? 'text-blue-500 hover:text-blue-400'
-                          : 'text-neutral-600 hover:text-neutral-500'
+                        ? 'text-blue-500 hover:text-blue-400'
+                        : 'text-neutral-600 hover:text-neutral-500'
                         } ${actingOn === table.id ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
                     >
                       {table.enabled ? (
@@ -207,8 +250,8 @@ export default function Dashboard() {
                         onClick={() => triggerFullLoad(table.id)}
                         disabled={actingOn === table.id + "_full" || !table.enabled}
                         className={`inline-flex items-center space-x-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${!table.enabled
-                            ? 'bg-neutral-900 text-neutral-600 border border-neutral-800/50 cursor-not-allowed'
-                            : 'bg-white text-neutral-950 hover:bg-neutral-200 hover:scale-105 active:scale-95 shadow-[0_0_15px_rgba(255,255,255,0.1)]'
+                          ? 'bg-neutral-900 text-neutral-600 border border-neutral-800/50 cursor-not-allowed'
+                          : 'bg-white text-neutral-950 hover:bg-neutral-200 hover:scale-105 active:scale-95 shadow-[0_0_15px_rgba(255,255,255,0.1)]'
                           }`}
                         title={!table.enabled ? "Enable sync first to trigger full load" : "Trigger Full Load"}
                       >

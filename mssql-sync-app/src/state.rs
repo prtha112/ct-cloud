@@ -50,3 +50,10 @@ pub async fn is_table_enabled(client: &Client, table_name: &str) -> RedisResult<
     let enabled_str: Option<String> = con.get(key)?;
     Ok(enabled_str.as_deref() == Some("true"))
 }
+
+pub async fn set_config(client: &Client, config_key: &str, value: &str) -> RedisResult<()> {
+    let mut con = client.get_connection()?;
+    let key = format!("mssql_sync:config:{}", config_key);
+    let _: () = con.set(key, value)?;
+    Ok(())
+}
