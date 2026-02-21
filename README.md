@@ -86,6 +86,12 @@ When deploying this application to a real production database where Change Track
 > **Note on Large Tables (Chunked Sync):** 
 > To prevent `Out of Memory` errors when syncing tables with millions of rows, the Full Re-Sync feature uses **Keyset Pagination**. It automatically detects the table's Primary Key (or falls back to the first column) and fetches records in chunks of 5,000 rows at a time until the entire table is seamlessly replicated.
 
+## Fault Tolerance & Idempotency
+
+This replication service is heavily designed to be **idempotent**, meaning that unexpected container restarts or disconnections will not result in duplicated or corrupted data.
+- **Incremental Sync Interruptions:** Changes are fetched from the `CHANGETABLE` and applied locally using an `UPSERT` pattern (Delete matching PK, then Insert). The tracked `version` in Redis is only updated **after** an entire transaction batch completes successfully. If the application crashes midway, it simply replays the exact same batch on startup with identical results.
+- **Force Load Interruptions:** Full-load progress is tracked per table. If an interruption occurs mid-load, the flag `force_full_load` remains `true` in Redis. On the next startup, the crawler will simply `TRUNCATE` the replica table strings again and re-initiate the batch insertion fresh from the start, guaranteeing zero duplications.
+
 ## View Synchronization
 
 While tables rely on MSSQL Change Tracking for row-level synchronization, **SQL Views** are automatically kept in sync via definition comparisons.
