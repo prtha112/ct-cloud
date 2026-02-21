@@ -17,14 +17,22 @@ pub async fn set_last_version(client: &Client, table_name: &str, version: i64) -
 pub async fn should_force_full_load(client: &Client, table_name: &str) -> RedisResult<bool> {
     let mut con = client.get_connection()?;
     let key = format!("mssql_sync:force_full_load:{}", table_name);
-    let exists: bool = con.exists(key)?;
-    Ok(exists)
+    let val: Option<String> = con.get(key)?;
+    Ok(val.as_deref() == Some("true"))
 }
 
 pub async fn clear_force_full_load(client: &Client, table_name: &str) -> RedisResult<()> {
     let mut con = client.get_connection()?;
     let key = format!("mssql_sync:force_full_load:{}", table_name);
-    let _: () = con.del(key)?;
+    let _: () = con.set(key, "false")?;
+    Ok(())
+}
+
+pub async fn init_force_full_load(client: &Client, table_name: &str) -> RedisResult<()> {
+    let mut con = client.get_connection()?;
+    let key = format!("mssql_sync:force_full_load:{}", table_name);
+    // SETNX will only set the key if it does not already exist
+    let _: () = redis::cmd("SETNX").arg(key).arg("false").query(&mut con)?;
     Ok(())
 }
 

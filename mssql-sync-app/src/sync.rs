@@ -52,6 +52,12 @@ pub async fn run_sync(
                     log::error!("Failed to initialize enabled flag for {}: {}", table_name, e);
                     continue;
                 }
+                
+                // Initialize force full load flag in Redis if it doesn't exist
+                if let Err(e) = state::init_force_full_load(&r_client, &table_name).await {
+                    log::error!("Failed to initialize force full load flag for {}: {}", table_name, e);
+                    continue;
+                }
 
                 // 2. Check if table synchronization is enabled
                 let is_enabled = state::is_table_enabled(&r_client, &table_name).await.unwrap_or(false);
