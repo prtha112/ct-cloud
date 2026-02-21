@@ -22,6 +22,11 @@ A Rust application that replicates data from a **Primary MSSQL** instance to a *
     -- 1. Create Database
     CREATE DATABASE testct;
     GO
+    
+    -- Enable Service Broker (Required for DDL Event Notifications)
+    ALTER DATABASE testct SET ENABLE_BROKER WITH ROLLBACK IMMEDIATE;
+    GO
+
     USE testct;
     GO
     
@@ -64,6 +69,26 @@ A Rust application that replicates data from a **Primary MSSQL** instance to a *
     ALTER TABLE [User]
     ENABLE CHANGE_TRACKING
     WITH (TRACK_COLUMNS_UPDATED = ON);
+    GO
+
+    ALTER TABLE [Product]
+    ENABLE CHANGE_TRACKING
+    WITH (TRACK_COLUMNS_UPDATED = ON);
+    GO
+
+    -- 4. Setup DDL Event Capture (For handling column renames/drops safely)
+    CREATE QUEUE SyncDDLQueue;
+    GO
+    
+    CREATE SERVICE SyncDDLService 
+    ON QUEUE SyncDDLQueue 
+    ([http://schemas.microsoft.com/SQL/Notifications/PostEventNotification]);
+    GO
+    
+    CREATE EVENT NOTIFICATION SyncDDLEvents
+    ON DATABASE
+    FOR DDL_TABLE_EVENTS, RENAME
+    TO SERVICE 'SyncDDLService', 'current database';
     GO
     ```
 

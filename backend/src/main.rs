@@ -8,6 +8,7 @@ use log::{info, error};
 mod state;
 mod schema;
 mod sync;
+mod ddl_events;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,6 +71,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(1);
     
     info!("Starting replication service with {} threads...", thread_count);
+
+    let ddl_primary = primary_pool.clone();
+    let ddl_replica = replica_pool.clone();
+    let ddl_redis = redis_client.clone();
+    tokio::spawn(async move {
+        ddl_events::start_consumer_loop(ddl_primary, ddl_replica, ddl_redis).await;
+    });
     
     loop {
         if let Err(e) = sync::run_sync(&primary_pool, &replica_pool, &redis_client, thread_count).await {
