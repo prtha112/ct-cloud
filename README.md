@@ -38,7 +38,29 @@ A Rust application that replicates data from a **Primary MSSQL** instance to a *
         email VARCHAR(100)
     );
     GO
-    
+
+    CREATE TABLE [Customer] (
+        CustomerId int IDENTITY(1,1) NOT NULL,
+        ExternalCode nvarchar(50) NOT NULL,
+        FullName nvarchar(200) NOT NULL,
+        Email nvarchar(200) NULL,
+        Status tinyint DEFAULT 1 NOT NULL,
+        CreatedAt datetime2(0) DEFAULT sysutcdatetime() NOT NULL,
+        UpdatedAt datetime2(0) NULL,
+        PRIMARY KEY (CustomerId),
+        UNIQUE (ExternalCode)
+    );
+    GO
+
+    CREATE TABLE [Product] (
+        id bigint NOT NULL,
+        Name text NULL,
+        Category varchar(100) NULL,
+        Price numeric(10,2) NULL,
+        PRIMARY KEY (id)
+    );
+    GO
+
     ALTER TABLE [User]
     ENABLE CHANGE_TRACKING
     WITH (TRACK_COLUMNS_UPDATED = ON);
