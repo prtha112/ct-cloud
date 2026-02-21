@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
 import { Database, RefreshCw, AlertCircle, CheckCircle2, ServerCog, PlaySquare, ToggleLeft, ToggleRight, ArrowRight } from "lucide-react";
 
 interface TableSyncState {
@@ -108,8 +109,15 @@ export default function Dashboard() {
       <header className="border-b border-neutral-800 bg-neutral-900/50 backdrop-blur-xl sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-6 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center space-x-3">
-            <div className="bg-blue-500/10 p-2 rounded-lg border border-blue-500/20">
-              <ServerCog className="w-5 h-5 text-blue-400" />
+            <div className="flex items-center justify-center shrink-0">
+              <Image
+                src="/c758aad8-6cc9-4f28-8647-8adbe9c707e7.png"
+                alt="Logo"
+                width={120}
+                height={40}
+                className="object-contain h-12 w-auto"
+                priority
+              />
             </div>
             <div>
               <h1 className="text-lg font-medium text-white tracking-tight">CT-Cloud MSSQL Sync Controller</h1>
