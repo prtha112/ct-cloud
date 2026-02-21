@@ -239,7 +239,7 @@ async fn sync_table(
             }
             
             total_inserted += row_count as i64;
-            info!("Force Load Chunk: Table {} - Inserted {}/{} total rows", table_name, row_count, total_inserted);
+            info!("Force Load Chunk: Table {} - Inserted {}/{} total rows", table_name, total_inserted, total_records);
             
             // Push Progress tracking to Redis!
             if let Err(e) = state::set_sync_progress(redis_client, table_name, total_inserted, total_records).await {
