@@ -1,4 +1,4 @@
-FROM rust:1.84 as builder
+FROM rust:1.93.1 as builder
 WORKDIR /usr/src/mssql-sync-app
 COPY . .
 RUN cargo install --path .
