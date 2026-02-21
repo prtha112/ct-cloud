@@ -21,8 +21,8 @@ jobs:
       - name: Build Docker Image
         uses: docker/build-push-action@v5
         with:
-          context: ./mssql-sync-app
+          context: ./backend
           push: false
-          tags: mssql-sync-app:test
+          tags: backend:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
