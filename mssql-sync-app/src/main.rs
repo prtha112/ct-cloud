@@ -53,6 +53,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             error!("View sync error: {}", e);
         }
 
+        // Sync stored procedures and functions
+        if let Err(e) = schema::sync_routines(&primary_pool, &replica_pool).await {
+            error!("Routine sync error: {}", e);
+        }
+
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }

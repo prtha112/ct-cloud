@@ -86,6 +86,14 @@ The application continuously queries `sys.views` and `sys.sql_modules` to compar
 - Drop and Recreate Views on the Replica if their underlying query definition changes on the Primary.
 - Drop Views on the Replica if they are no longer present on the Primary.
 
+## Stored Procedure & Function Synchronization
+
+Along with Views, the app actively monitors and syncs Stored Procedures and User-Defined Functions (`Scalar`, `Table-Valued`, and `Inline Table-Valued`). 
+
+- Using `sys.objects` and `sys.sql_modules`, the logic tracks definition alterations for these routines.
+- Changes or additions on the Primary are matched on the Replica by determining the correct drop types (`DROP PROCEDURE` or `DROP FUNCTION`) and recreating the script.
+- **Triggers** (`TR`) are strictly ignored from this sync process to prevent event duplication loops or unwanted data cascading effects on the Replica.
+
 ## Architecture
 
 - **Primary**: MSSQL 2022 (Port 1434)

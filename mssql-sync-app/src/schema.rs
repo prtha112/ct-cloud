@@ -588,3 +588,87 @@ pub async fn sync_views(
 
     Ok(())
 }
+
+pub async fn sync_routines(
+    primary_pool: &Pool<Mssql>,
+    replica_pool: &Pool<Mssql>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let routines_query = "
+        SELECT 
+            o.name as ObjectName, 
+            s.name as SchemaName, 
+            o.type as ObjectType,
+            CAST(m.definition AS NVARCHAR(4000)) as Definition 
+        FROM sys.objects o 
+        JOIN sys.sql_modules m ON o.object_id = m.object_id 
+        JOIN sys.schemas s ON o.schema_id = s.schema_id
+        WHERE o.type IN ('P', 'FN', 'IF', 'TF')
+    ";
+
+    let p_routines = sqlx::query(routines_query).fetch_all(primary_pool).await?;
+    let r_routines = sqlx::query(routines_query).fetch_all(replica_pool).await?;
+
+    let mut p_map = std::collections::HashMap::new();
+    for row in &p_routines {
+        let name: String = row.get::<String, _>("ObjectName");
+        let schema: String = row.get::<String, _>("SchemaName");
+        let obj_type: String = row.get::<String, _>("ObjectType");
+        let def: Option<String> = row.try_get("Definition").ok();
+        p_map.insert(format!("{}.{}", schema, name), (obj_type.trim().to_string(), def.unwrap_or_default()));
+    }
+
+    let mut r_map = std::collections::HashMap::new();
+    for row in &r_routines {
+        let name: String = row.get::<String, _>("ObjectName");
+        let schema: String = row.get::<String, _>("SchemaName");
+        let obj_type: String = row.get::<String, _>("ObjectType");
+        let def: Option<String> = row.try_get("Definition").ok();
+        r_map.insert(format!("{}.{}", schema, name), (obj_type.trim().to_string(), def.unwrap_or_default()));
+    }
+
+    // Helper to determine DROP statement
+    let get_drop_type = |obj_type: &str| -> &str {
+        match obj_type {
+            "P" => "PROCEDURE",
+            "FN" | "IF" | "TF" => "FUNCTION",
+            _ => "PROCEDURE", // Fallback, though shouldn't happen based on IN clause
+        }
+    };
+
+    // Drop missing routines on replica
+    for (r_key, (r_type, _)) in &r_map {
+        if !p_map.contains_key(r_key) {
+            let drop_term = get_drop_type(r_type);
+            info!("Dropping {} {}", drop_term, r_key);
+            let drop_sql = format!("DROP {} [{}]", drop_term, r_key.replace(".", "].["));
+            if let Err(e) = sqlx::query(&drop_sql).execute(replica_pool).await {
+                log::warn!("Failed to drop {} {}: {}", drop_term, r_key, e);
+            }
+        }
+    }
+
+    // Create or Alter routines on replica
+    for (p_key, (p_type, p_def)) in &p_map {
+        let should_sync = match r_map.get(p_key) {
+            Some((_, r_def)) => p_def != r_def,
+            None => true,
+        };
+
+        if should_sync {
+            let drop_term = get_drop_type(p_type);
+            info!("Syncing {} {}", drop_term, p_key);
+            
+            // Drop so we can recreate if it exists on replica
+            if r_map.contains_key(p_key) {
+                let drop_sql = format!("DROP {} [{}]", drop_term, p_key.replace(".", "].["));
+                let _ = sqlx::query(&drop_sql).execute(replica_pool).await;
+            }
+            if let Err(e) = sqlx::query(p_def).execute(replica_pool).await {
+                log::warn!("Failed to sync {} {}: {}", drop_term, p_key, e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
