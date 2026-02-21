@@ -24,6 +24,7 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actingOn, setActingOn] = useState<string | null>(null);
+  const [confirmTable, setConfirmTable] = useState<string | null>(null);
 
   const fetchTables = async () => {
     try {
@@ -81,10 +82,7 @@ export default function Dashboard() {
   };
 
   const triggerFullLoad = async (tableId: string) => {
-    if (!confirm(`Are you sure you want to trigger a Full Load for ${tableId}? This will TRUNCATE the replica table and reload all current data.`)) {
-      return;
-    }
-
+    setConfirmTable(null); // Close modal
     setActingOn(tableId + "_full");
     try {
       const res = await fetch(`/api/tables/${tableId}`, {
@@ -272,7 +270,7 @@ export default function Dashboard() {
                       </div>
                     ) : (
                       <button
-                        onClick={() => triggerFullLoad(table.id)}
+                        onClick={() => setConfirmTable(table.id)}
                         disabled={actingOn === table.id + "_full" || !table.enabled}
                         className={`inline-flex items-center space-x-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${!table.enabled
                           ? 'bg-neutral-900 text-neutral-600 border border-neutral-800/50 cursor-not-allowed'
@@ -292,6 +290,42 @@ export default function Dashboard() {
           </div>
         </div>
       </main>
+
+      {/* Confirmation Modal */}
+      {confirmTable && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-6">
+              <div className="flex items-center space-x-4 text-amber-500 mb-4">
+                <AlertCircle className="w-8 h-8" />
+                <h3 className="text-xl font-semibold text-white">Confirm Force Load</h3>
+              </div>
+              <p className="text-neutral-400 mb-6">
+                Are you sure you want to trigger a Full Load for <strong className="text-white">{confirmTable}</strong>?
+                <br /><br />
+                This action will <strong className="text-rose-400">TRUNCATE</strong> the replica table and reload all current data from the primary database.
+              </p>
+
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setConfirmTable(null)}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-neutral-300 hover:bg-neutral-800 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => triggerFullLoad(confirmTable)}
+                  className="px-4 py-2 rounded-lg text-sm font-medium bg-amber-500 hover:bg-amber-400 text-amber-950 transition-colors flex items-center space-x-2"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  <span>Execute Full Load</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
