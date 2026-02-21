@@ -111,7 +111,15 @@ async fn sync_table(
     // Check for Force Full Load Flag
     let force_full_load = state::should_force_full_load(redis_client, table_name).await.unwrap_or(false);
 
+    // Get Total Table Count
+    let total_count_query = format!("SELECT CAST(COUNT_BIG(*) AS BIGINT) FROM [{}]", table_name);
+    let total_records: i64 = sqlx::query_scalar(&total_count_query).fetch_one(primary_pool).await.unwrap_or(0);
+
     if !force_full_load && current_version <= last_version {
+        // We are already fully synced
+        if let Err(e) = state::set_sync_progress(redis_client, table_name, total_records, total_records).await {
+             log::warn!("Failed to store sync progress: {}", e);
+        }
         return Ok(());
     }
 
@@ -230,9 +238,14 @@ async fn sync_table(
                  query_builder.execute(replica_pool).await?;
             }
             
-            total_inserted += row_count;
+            total_inserted += row_count as i64;
             info!("Force Load Chunk: Table {} - Inserted {}/{} total rows", table_name, row_count, total_inserted);
             
+            // Push Progress tracking to Redis!
+            if let Err(e) = state::set_sync_progress(redis_client, table_name, total_inserted, total_records).await {
+                log::warn!("Failed to set force-load sync progress: {}", e);
+            }
+
             offset += chunk_size;
             
             if row_count < chunk_size {
@@ -346,6 +359,11 @@ async fn sync_table(
         state::set_last_version(redis_client, table_name, last_change_ver).await?;
     } else {
         state::set_last_version(redis_client, table_name, current_version).await?;
+    }
+
+    // Set Incremental Tracking Finished State
+    if let Err(e) = state::set_sync_progress(redis_client, table_name, total_records, total_records).await {
+        log::warn!("Failed to set end-of-sync progress: {}", e);
     }
 
     Ok(())

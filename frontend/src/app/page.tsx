@@ -10,6 +10,7 @@ interface TableSyncState {
   enabled: boolean;
   forceFullLoad: boolean;
   version: number;
+  progress: { synced: number; total: number } | null;
 }
 
 interface AppConfig {
@@ -225,9 +226,10 @@ export default function Dashboard() {
                     </div>
                   </div>
 
-                  {/* Sync Status Toggle */}
-                  <div className="col-span-1 flex justify-between md:justify-center items-center py-2 md:py-0 border-b md:border-b-0 border-neutral-800 md:col-span-2">
-                    <span className="text-sm text-neutral-400 md:hidden">Sync Status:</span>
+                  {/* Sync Status / Progress */}
+                  <div className="col-span-1 md:col-span-2 flex flex-col justify-center items-center py-2 md:py-0 border-b md:border-b-0 border-neutral-800">
+                    <span className="text-sm text-neutral-400 md:hidden mb-2">Sync Status:</span>
+
                     <button
                       onClick={() => toggleEnabled(table.id)}
                       disabled={actingOn === table.id}
@@ -243,6 +245,21 @@ export default function Dashboard() {
                         <ToggleLeft className="w-10 h-10" strokeWidth={1.5} />
                       )}
                     </button>
+
+                    {table.enabled && table.progress && (
+                      <div className="mt-1 w-full max-w-[160px] mx-auto text-center" title={`${table.progress.synced.toLocaleString()} / ${table.progress.total.toLocaleString()} rows`}>
+                        <div className="flex justify-between text-[10px] text-neutral-500 font-mono mb-1">
+                          <span>{table.progress.synced >= table.progress.total ? 'Synced' : 'Loading'}</span>
+                          <span>{table.progress.synced.toLocaleString()} / {table.progress.total.toLocaleString()}</span>
+                        </div>
+                        <div className="h-1.5 w-full bg-neutral-800 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-500 ${table.progress.synced >= table.progress.total ? 'bg-emerald-500' : 'bg-blue-500 animate-pulse'}`}
+                            style={{ width: `${table.progress.total > 0 ? Math.min(100, (table.progress.synced / table.progress.total) * 100) : 0}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Actions */}
