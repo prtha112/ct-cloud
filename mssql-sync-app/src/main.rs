@@ -48,6 +48,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             error!("Sync error: {}", e);
         }
 
+        // Sync views after all tables are processed (to avoid missing table dependencies)
+        if let Err(e) = schema::sync_views(&primary_pool, &replica_pool).await {
+            error!("View sync error: {}", e);
+        }
+
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }

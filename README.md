@@ -77,6 +77,15 @@ The app will detect this flag, reload the table on the Replica, and automaticall
 > **Note on Large Tables (Chunked Sync):** 
 > To prevent `Out of Memory` errors when syncing tables with millions of rows, the Full Re-Sync feature uses **Keyset Pagination**. It automatically detects the table's Primary Key (or falls back to the first column) and fetches records in chunks of 5,000 rows at a time until the entire table is seamlessly replicated.
 
+## View Synchronization
+
+While tables rely on MSSQL Change Tracking for row-level synchronization, **SQL Views** are automatically kept in sync via definition comparisons.
+
+The application continuously queries `sys.views` and `sys.sql_modules` to compare `CREATE VIEW` statements between the Primary and Replica databases. it will dynamically:
+- Create new Views on the Replica if they are found on the Primary.
+- Drop and Recreate Views on the Replica if their underlying query definition changes on the Primary.
+- Drop Views on the Replica if they are no longer present on the Primary.
+
 ## Architecture
 
 - **Primary**: MSSQL 2022 (Port 1434)

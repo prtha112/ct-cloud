@@ -521,3 +521,70 @@ pub async fn sync_schema_objects(
 
     Ok(())
 }
+
+pub async fn sync_views(
+    primary_pool: &Pool<Mssql>,
+    replica_pool: &Pool<Mssql>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let views_query = "
+        SELECT 
+            v.name as ViewName, 
+            s.name as SchemaName, 
+            CAST(m.definition AS NVARCHAR(4000)) as Definition 
+        FROM sys.views v 
+        JOIN sys.sql_modules m ON v.object_id = m.object_id 
+        JOIN sys.schemas s ON v.schema_id = s.schema_id
+    ";
+
+    let p_views = sqlx::query(views_query).fetch_all(primary_pool).await?;
+    let r_views = sqlx::query(views_query).fetch_all(replica_pool).await?;
+
+    let mut p_map = std::collections::HashMap::new();
+    for row in &p_views {
+        let name: String = row.get::<String, _>("ViewName");
+        let schema: String = row.get::<String, _>("SchemaName");
+        let def: Option<String> = row.try_get("Definition").ok();
+        p_map.insert(format!("{}.{}", schema, name), def.unwrap_or_default());
+    }
+
+    let mut r_map = std::collections::HashMap::new();
+    for row in &r_views {
+        let name: String = row.get::<String, _>("ViewName");
+        let schema: String = row.get::<String, _>("SchemaName");
+        let def: Option<String> = row.try_get("Definition").ok();
+        r_map.insert(format!("{}.{}", schema, name), def.unwrap_or_default());
+    }
+
+    // Drop missing views on replica
+    for (r_key, _) in &r_map {
+        if !p_map.contains_key(r_key) {
+            info!("Dropping View {}", r_key);
+            let drop_sql = format!("DROP VIEW [{}]", r_key.replace(".", "].["));
+            if let Err(e) = sqlx::query(&drop_sql).execute(replica_pool).await {
+                log::warn!("Failed to drop view {}: {}", r_key, e);
+            }
+        }
+    }
+
+    // Create or Alter views on replica
+    for (p_key, p_def) in &p_map {
+        let should_sync = match r_map.get(p_key) {
+            Some(r_def) => p_def != r_def,
+            None => true,
+        };
+
+        if should_sync {
+            info!("Syncing View {}", p_key);
+            // Drop so we can recreate
+            if r_map.contains_key(p_key) {
+                let drop_sql = format!("DROP VIEW [{}]", p_key.replace(".", "].["));
+                let _ = sqlx::query(&drop_sql).execute(replica_pool).await;
+            }
+            if let Err(e) = sqlx::query(p_def).execute(replica_pool).await {
+                log::warn!("Failed to sync view {}: {}", p_key, e);
+            }
+        }
+    }
+
+    Ok(())
+}
