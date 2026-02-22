@@ -85,9 +85,12 @@ A Rust application that replicates data from a **Primary MSSQL** instance to a *
     ([http://schemas.microsoft.com/SQL/Notifications/PostEventNotification]);
     GO
     
+    DROP EVENT NOTIFICATION SyncDDLEvents ON DATABASE;
+    GO
+    
     CREATE EVENT NOTIFICATION SyncDDLEvents
     ON DATABASE
-    FOR DDL_TABLE_EVENTS, RENAME
+    FOR DDL_TABLE_EVENTS, DDL_INDEX_EVENTS, RENAME
     TO SERVICE 'SyncDDLService', 'current database';
     GO
     ```

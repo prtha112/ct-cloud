@@ -121,6 +121,10 @@ pub async fn ensure_table_exists(
         );
         let _ = sqlx::query(&enable_ct_query).execute(replica_pool).await;
 
+        // Initialize schema objects (Indexes, Unique constraints, Foreign keys) for the newly created table
+        info!("Initializing indexes and constraints for new table {}", table_name);
+        sync_schema_objects(primary_pool, replica_pool, table_name).await?;
+
     } else {
        // Table exists, check for missing columns and property mismatches
        let replica_cols_query = format!(
@@ -192,9 +196,6 @@ pub async fn ensure_table_exists(
            }
        }
     }
-
-    // Sync schema objects (Indexes, Unique constraints, Foreign keys)
-    sync_schema_objects(primary_pool, replica_pool, table_name).await?;
 
     Ok(())
 }
