@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import { Toaster, toast } from "react-hot-toast";
 import Image from "next/image";
-import { Database, RefreshCw, AlertCircle, CheckCircle2, ServerCog, PlaySquare, ToggleLeft, ToggleRight, ArrowRight } from "lucide-react";
+import { Database, RefreshCw, AlertCircle, PlaySquare, ToggleLeft, ToggleRight, ArrowRight } from "lucide-react";
 
 interface TableSyncState {
   id: string;
@@ -92,8 +92,12 @@ export default function Dashboard() {
       prevTablesRef.current = newTables;
       setTables(newTables);
       setError(null);
-    } catch (err: any) {
-      setError(err.message || "An unexpected error occurred.");
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        setError(err.message || "An unexpected error occurred.");
+      } else {
+        setError("An unexpected error occurred.");
+      }
     } finally {
       setIsLoading(false);
     }

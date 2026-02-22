@@ -7,6 +7,7 @@ use sqlx::mssql::MssqlPoolOptions;
 use redis::Client;
 use dotenv::dotenv;
 use log::{info, error, debug};
+use tokio_util::sync::CancellationToken;
 
 mod state;
 mod schema;
@@ -73,13 +74,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse::<usize>()
         .unwrap_or(1);
     
+    let cancel_token = CancellationToken::new();
+
+    // Spawn a graceful shutdown listener
+    let cancel_clone = cancel_token.clone();
+    tokio::spawn(async move {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                info!("SIGTERM/Ctrl-C received, initiating graceful shutdown...");
+                cancel_clone.cancel();
+            },
+            Err(e) => {
+                error!("Failed to listen for shutdown signal: {}", e);
+            },
+        }
+    });
+
     info!("Starting replication service with {} threads...", thread_count);
 
     let ddl_primary = primary_pool.clone();
     let ddl_replica = replica_pool.clone();
     let ddl_redis = redis_client.clone();
+    let ddl_token = cancel_token.clone();
     tokio::spawn(async move {
-        ddl_events::start_consumer_loop(ddl_primary, ddl_replica, ddl_redis).await;
+        ddl_events::start_consumer_loop(ddl_primary, ddl_replica, ddl_redis, ddl_token).await;
     });
     
     // Global Concurrency State
@@ -87,6 +105,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let active_tasks: Arc<TokioMutex<HashSet<String>>> = Arc::new(TokioMutex::new(HashSet::new()));
 
     loop {
+        if cancel_token.is_cancelled() {
+            info!("Shutting down main replication service loop...");
+            break;
+        }
+
         // Fetch all tracked tables
         let tables_query = "
             SELECT t.name AS TableName
@@ -117,6 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let r_client = redis_client.clone();
                     let sem_clone = Arc::clone(&semaphore);
                     let active_clone = Arc::clone(&active_tasks);
+                    let table_token = cancel_token.clone();
 
                     tokio::spawn(async move {
                         // Attempt to acquire a permit. This will hang here if SYNC_THREADS is exhausted
@@ -130,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         
                         // Pass off to sync process
-                        if let Err(e) = sync::run_single_table_sync(&p_pool, &r_pool, &r_client, &table_name).await {
+                        if let Err(e) = sync::run_single_table_sync(&p_pool, &r_pool, &r_client, &table_name, table_token).await {
                             error!("Sync error on table {}: {}", table_name, e);
                         }
 
@@ -151,6 +175,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             error!("Routine sync error: {}", e);
         }
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            _ = cancel_token.cancelled() => {
+                info!("Shutting down main replication service loop during sleep delay...");
+                break;
+            }
+        }
     }
+
+    Ok(())
 }

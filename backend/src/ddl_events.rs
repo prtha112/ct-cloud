@@ -5,17 +5,32 @@ use redis::Client;
 use tokio::time::sleep;
 use crate::state;
 
+use tokio_util::sync::CancellationToken;
+
 pub async fn start_consumer_loop(
     primary_pool: Pool<Mssql>,
     replica_pool: Pool<Mssql>,
-    redis_client: Client
+    redis_client: Client,
+    cancel_token: CancellationToken
 ) {
     info!("Starting DDL Event consumer loop...");
     
     loop {
+        if cancel_token.is_cancelled() {
+            info!("Shutting down DDL consumer loop...");
+            break;
+        }
+
         if let Err(e) = consume_events(&primary_pool, &replica_pool, &redis_client).await {
             error!("Error consuming DDL events: {}", e);
-            sleep(Duration::from_secs(5)).await;
+            
+            tokio::select! {
+                _ = sleep(Duration::from_secs(5)) => {}
+                _ = cancel_token.cancelled() => {
+                    info!("Shutting down DDL consumer loop during backoff sleep...");
+                    break;
+                }
+            }
         }
     }
 }

@@ -6,11 +6,14 @@ use log::{info, debug};
 use crate::state;
 use crate::schema;
 
+use tokio_util::sync::CancellationToken;
+
 pub async fn run_single_table_sync(
     primary_pool: &Pool<Mssql>,
     replica_pool: &Pool<Mssql>,
     redis_client: &Client,
-    table_name: &str
+    table_name: &str,
+    cancel_token: CancellationToken
 ) -> Result<(), Box<dyn std::error::Error>> {
     debug!("Processing table: {}", table_name);
 
@@ -39,7 +42,7 @@ pub async fn run_single_table_sync(
         .map_err(|e| format!("Schema error on {}: {}", table_name, e))?;
 
     // Sync data
-    sync_table(primary_pool, replica_pool, redis_client, table_name)
+    sync_table(primary_pool, replica_pool, redis_client, table_name, cancel_token)
         .await
         .map_err(|e| format!("Sync error on {}: {}", table_name, e))?;
 
@@ -50,7 +53,8 @@ async fn sync_table(
     primary_pool: &Pool<Mssql>,
     replica_pool: &Pool<Mssql>,
     redis_client: &Client,
-    table_name: &str
+    table_name: &str,
+    cancel_token: CancellationToken
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 2. Get current version from Primary
     let current_ver_query = "SELECT CHANGE_TRACKING_CURRENT_VERSION()";
@@ -158,6 +162,10 @@ async fn sync_table(
         let mut total_inserted = 0;
         
         loop {
+            if cancel_token.is_cancelled() {
+                info!("Force load cancelled for {}; saving progress and aborting loop.", table_name);
+                break;
+            }
             let full_query = format!(
                 "SELECT {} FROM [{}] ORDER BY [{}] OFFSET {} ROWS FETCH NEXT {} ROWS ONLY", 
                 select_list, table_name, order_col, offset, chunk_size
@@ -268,67 +276,124 @@ async fn sync_table(
         pk_col, table_name
     );
 
+    info!("Fetching CHANGETABLE for {}...", table_name);
     let changes = sqlx::query(&changes_query)
         .bind(last_version)
         .fetch_all(primary_pool)
         .await?;
 
+    let mut delete_pks = std::collections::HashSet::new();
+    let mut upsert_pks = std::collections::HashSet::new();
+
     for change in &changes {
-        let _version: i64 = change.get("SYS_CHANGE_VERSION");
         let op: String = change.get("SYS_CHANGE_OPERATION");
         let pk_val_str: String = change.get("pk_val_str"); 
 
+        // Safely escape single quotes for the IN clause
+        let safe_pk = pk_val_str.replace("'", "''");
+
         match op.as_str() {
             "D" => {
-                // Delete in Replica
-                let del_sql = format!("DELETE FROM [{}] WHERE [{}] = @p1", table_name, pk_col);
-                sqlx::query(&del_sql).bind(&pk_val_str).execute(replica_pool).await?;
+                delete_pks.insert(safe_pk.clone());
+                upsert_pks.remove(&safe_pk);
             },
             "I" | "U" => {
-                // Fetch full row from Primary using safe SELECT list
-                let row_query = format!("SELECT {} FROM [{}] WHERE [{}] = @p1", select_list, table_name, pk_col);
-                let row_opt = sqlx::query(&row_query).bind(&pk_val_str).fetch_optional(primary_pool).await?;
-                
-                if let Some(row) = row_opt {
-                    // UPSERT into Replica
-                    let del_sql = format!("DELETE FROM [{}] WHERE [{}] = @p1", table_name, pk_col);
-                    sqlx::query(&del_sql).bind(&pk_val_str).execute(replica_pool).await?;
-
-                    // Build INSERT
-                    let mut cols = Vec::new();
-                    let mut placeholders = Vec::new();
-
-                    for col in row.columns() {
-                        let name = col.name();
-                        cols.push(format!("[{}]", name));
-                        placeholders.push(format!("@p{}", cols.len()));
-                    }
-
-                    let insert_sql = if has_identity {
-                        format!(
-                            "SET IDENTITY_INSERT [{}] ON; INSERT INTO [{}] ({}) VALUES ({}); SET IDENTITY_INSERT [{}] OFF;",
-                            table_name, table_name, cols.join(", "), placeholders.join(", "), table_name
-                        )
-                    } else {
-                        format!(
-                            "INSERT INTO [{}] ({}) VALUES ({})",
-                            table_name, cols.join(", "), placeholders.join(", ")
-                        )
-                    };
-
-                    let mut query_builder = sqlx::query(&insert_sql);
-                    
-                    // Bind values (All fields are dynamically converted to String via select_list to avoid driver decode strictness)
-                    for col in row.columns() {
-                         let v: Option<String> = row.try_get(col.ordinal()).ok();
-                         query_builder = query_builder.bind(v);
-                    }
-                    
-                    query_builder.execute(replica_pool).await?;
-                }
+                upsert_pks.insert(safe_pk.clone());
+                delete_pks.remove(&safe_pk);
             },
             _ => {}
         }
+    }
+
+    let delete_pks: Vec<_> = delete_pks.into_iter().collect();
+    let upsert_pks: Vec<_> = upsert_pks.into_iter().collect();
+
+    // Perform Bulk Deletes
+    for chunk in delete_pks.chunks(100) {
+        if cancel_token.is_cancelled() {
+            info!("Incremental sync cancelled for {}; aborting delete loop.", table_name);
+            break;
+        }
+        let in_clause = chunk.iter().map(|k| format!("'{}'", k)).collect::<Vec<_>>().join(",");
+        if !in_clause.is_empty() {
+            let del_sql = format!("DELETE FROM [{}] WHERE [{}] IN ({})", table_name, pk_col, in_clause);
+            info!("Executing bulk DELETE chunk for {} ({} items)...", table_name, chunk.len());
+            sqlx::query(&del_sql).execute(replica_pool).await?;
+        }
+    }
+
+    // Perform Bulk Upserts
+    for chunk in upsert_pks.chunks(100) {
+        if cancel_token.is_cancelled() {
+            info!("Incremental sync cancelled for {}; aborting upsert loop.", table_name);
+            break;
+        }
+        let in_clause = chunk.iter().map(|k| format!("'{}'", k)).collect::<Vec<_>>().join(",");
+        if in_clause.is_empty() {
+            continue;
+        }
+
+        // Fetch full rows from Primary in bulk
+        let row_query = format!("SELECT {} FROM [{}] WHERE [{}] IN ({})", select_list, table_name, pk_col, in_clause);
+        info!("Executing bulk UPSERT chunk SELECT for {} ({} items)...", table_name, chunk.len());
+        let rows = sqlx::query(&row_query).fetch_all(primary_pool).await?;
+
+        if rows.is_empty() {
+            continue;
+        }
+
+        // Build INSERT query structure based on the first returned row
+        let mut cols = Vec::new();
+        let mut placeholders = Vec::new();
+        for col in rows[0].columns() {
+            cols.push(format!("[{}]", col.name()));
+            placeholders.push(format!("@p{}", cols.len()));
+        }
+
+        let insert_sql = if has_identity {
+            format!(
+                "SET IDENTITY_INSERT [{}] ON; INSERT INTO [{}] ({}) VALUES ({});",
+                table_name, table_name, cols.join(", "), placeholders.join(", ")
+            )
+        } else {
+            format!(
+                "INSERT INTO [{}] ({}) VALUES ({});",
+                table_name, cols.join(", "), placeholders.join(", ")
+            )
+        };
+
+        // Execute bulk Upsert via Transaction (DELETE then chunked INSERT)
+        let mut tx = replica_pool.begin().await?;
+
+        // 1. Delete existing rows in Replica to prepare for Insert
+        let del_sql = format!("DELETE FROM [{}] WHERE [{}] IN ({})", table_name, pk_col, in_clause);
+        if let Err(e) = sqlx::query(&del_sql).execute(&mut *tx).await {
+            log::error!("Tx Incremental Delete Failed: {}", e);
+            tx.rollback().await?;
+            return Err(Box::new(e));
+        }
+
+        // 2. Insert new rows in a tight loop over the same transaction
+        info!("Executing bulk UPSERT chunk INSERTs for {} ({} rows)...", table_name, rows.len());
+        for row in rows {
+            let mut query_builder = sqlx::query(&insert_sql);
+            for col in row.columns() {
+                let v: Option<String> = row.try_get(col.ordinal()).ok();
+                query_builder = query_builder.bind(v);
+            }
+            if let Err(e) = query_builder.execute(&mut *tx).await {
+                log::error!("Tx Incremental Insert Failed: {}", e);
+                tx.rollback().await?;
+                return Err(Box::new(e));
+            }
+        }
+
+        if has_identity {
+             let disable_identity = format!("SET IDENTITY_INSERT [{}] OFF;", table_name);
+             let _ = sqlx::query(&disable_identity).execute(&mut *tx).await;
+        }
+
+        tx.commit().await?;
     }
 
     // Update Redis

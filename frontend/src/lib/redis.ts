@@ -8,10 +8,12 @@ let redis: Redis;
 if (process.env.NODE_ENV === 'production') {
     redis = new Redis(redisUrl);
 } else {
-    if (!(global as any).redis) {
-        (global as any).redis = new Redis(redisUrl);
+    // Avoid creating multiple connections during Next.js hot reloads in dev
+    const globalForRedis = global as unknown as { redis: Redis };
+    if (!globalForRedis.redis) {
+        globalForRedis.redis = new Redis(redisUrl);
     }
-    redis = (global as any).redis;
+    redis = globalForRedis.redis;
 }
 
 export default redis;
