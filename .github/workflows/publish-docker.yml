@@ -79,3 +79,18 @@ jobs:
           labels: ${{ steps.meta-frontend.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Create or Update Tag
+        if: github.event_name == 'push'
+        run: |
+          TAG_NAME="v${{ env.CLEAN_VERSION }}"
+          echo "Processing tag: $TAG_NAME"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Force create the tag locally (will overwrite if exists)
+          git tag -f "$TAG_NAME"
+          
+          # Force push the tag to origin (will overwrite remote if exists)
+          git push origin "$TAG_NAME" --force
