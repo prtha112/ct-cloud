@@ -15,6 +15,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "CT-Cloud MSSQL Sync Controller",
   description: "Manage MSSQL Sync and Redis configuration states.",
+  icons: {
+    icon: '/c758aad8-6cc9-4f28-8647-8adbe9c707e7.png',
+  },
 };
 
 export default function RootLayout({
