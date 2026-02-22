@@ -165,6 +165,14 @@ async fn sync_table(
         .fetch_optional(primary_pool)
         .await?;
     let has_identity = has_identity_val.unwrap_or(0) == 1;
+    
+    // Fallback: Also check replica just in case
+    let replica_has_identity: Option<i32> = sqlx::query_scalar(&identity_check_query)
+        .fetch_optional(replica_pool)
+        .await?;
+    let r_has_identity = replica_has_identity.unwrap_or(0) == 1;
+    
+    let has_identity = has_identity || r_has_identity;
 
     // --- FORCE FULL LOAD LOGIC ---
     if force_full_load {
@@ -205,38 +213,51 @@ async fn sync_table(
                 break;
             }
             
-            for row in rows {
-                 // Build INSERT
-                 let mut cols = Vec::new();
-                 let mut placeholders = Vec::new();
-
-                 for col in row.columns() {
-                     let name = col.name();
-                     cols.push(format!("[{}]", name));
-                     placeholders.push(format!("@p{}", cols.len()));
-                 }
-
-                 let insert_sql = if has_identity {
-                     format!(
-                         "SET IDENTITY_INSERT [{}] ON; INSERT INTO [{}] ({}) VALUES ({}); SET IDENTITY_INSERT [{}] OFF;",
-                         table_name, table_name, cols.join(", "), placeholders.join(", "), table_name
-                     )
-                 } else {
-                     format!(
-                         "INSERT INTO [{}] ({}) VALUES ({})",
-                         table_name, cols.join(", "), placeholders.join(", ")
-                     )
-                 };
-
-                 let mut query_builder = sqlx::query(&insert_sql);
-                 
-                 for col in row.columns() {
-                      let v: Option<String> = row.try_get(col.ordinal()).ok();
-                      query_builder = query_builder.bind(v);
-                 }
-                 
-                 query_builder.execute(replica_pool).await?;
+            // We use a Transaction to group thousands of single-row inserts for speed
+            // This avoids the 'os error 104' (connection reset by peer) caused by massive query strings
+            let mut tx = replica_pool.begin().await?;
+            
+            // Reusable string components for the query
+            let mut cols = Vec::new();
+            let mut placeholders = Vec::new();
+            for col in rows[0].columns() {
+                cols.push(format!("[{}]", col.name()));
+                placeholders.push(format!("@p{}", cols.len()));
             }
+            
+            let insert_sql = if has_identity {
+                format!(
+                    "SET IDENTITY_INSERT [{}] ON; INSERT INTO [{}] ({}) VALUES ({});",
+                     table_name, table_name, cols.join(", "), placeholders.join(", ")
+                )
+            } else {
+                format!(
+                    "INSERT INTO [{}] ({}) VALUES ({});",
+                     table_name, cols.join(", "), placeholders.join(", ")
+                )
+            };
+            
+            for row in rows {
+                let mut query_builder = sqlx::query(&insert_sql);
+                 
+                for col in row.columns() {
+                     let v: Option<String> = row.try_get(col.ordinal()).ok();
+                     query_builder = query_builder.bind(v);
+                }
+                 
+                if let Err(e) = query_builder.execute(&mut *tx).await {
+                    log::error!("Tx Insert Failed: {}", e);
+                    tx.rollback().await?;
+                    return Err(Box::new(e));
+                }
+            }
+            
+            if has_identity {
+                 let disable_identity = format!("SET IDENTITY_INSERT [{}] OFF;", table_name);
+                 let _ = sqlx::query(&disable_identity).execute(&mut *tx).await;
+            }
+            
+            tx.commit().await?;
             
             total_inserted += row_count as i64;
             info!("Force Load Chunk: Table {} - Inserted {}/{} total rows", table_name, total_inserted, total_records);

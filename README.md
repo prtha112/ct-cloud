@@ -156,6 +156,19 @@ Along with Views, the app actively monitors and syncs Stored Procedures and User
 - Changes or additions on the Primary are matched on the Replica by determining the correct drop types (`DROP PROCEDURE` or `DROP FUNCTION`) and recreating the script.
 - **Triggers** (`TR`) are strictly ignored from this sync process to prevent event duplication loops or unwanted data cascading effects on the Replica.
 
+## 🚀 Performance & Safety Optimizations
+
+### ⚡ Accelerated Bulk Synchronization (Full Load Batch Insert)
+The historic `Force Full Load` feature no longer relies on executing row-by-row sequenced queries. It has been entirely re-architected to leverage **Massive Database Transactions** (`BEGIN TRAN ... COMMIT`).
+- The system binds thousands of single-row insert parameters simultaneously and submits them under an encapsulated, localized database transaction block.
+- This Batch Processing methodology evaluates and processes hundreds of thousands of rows (e.g. `Product` and `Customer` tables) instantaneously over the network.
+- This specific transactional structure guarantees that the pipeline bypasses SQL Server's undocumented generic limitation (which often forcefully rips and resets the TCP connection (`os error 104`) when attempting to pipeline query strings of excessive lengths).
+
+### 🛡️ Ironclad Data Protection (DDL Event Capture)
+- **Blind-Drop Prevention:** The declarative engine historically monitored schema structure. If a user renamed a column on the primary using `sp_rename`, the scanner perceived a "missing" column and eagerly issued a `DROP COLUMN` on the replica—causing catastrophic data loss. This has been patched with a **Soft Drop Safety** toggle; automated blind drops are suspended to ensure 100% data preservation during transit.
+- **Real-Time Event Capturing:** To structurally mirror genuine DDL operations, the system deploys **MSSQL Service Broker (Event Notification)** architecture on the primary database. A standalone Rust background worker continuously polls the `<SyncDDLQueue>`. Upon intercepting structural events (`DDL_TABLE_EVENTS`, `RENAME`), it unwraps the XML payload and deterministically replays the precise T-SQL script against the replica database.
+- **Identity Constraints Reliability:** During massive Batch Inserts, the system perfectly synchronizes the required `SET IDENTITY_INSERT ON` flag by meticulously encapsulating it into the specific `sqlx::query` transaction block, removing pesky identity parsing conflicts entirely.
+
 ## Architecture
 
 - **Primary**: MSSQL 2022 (Port 1434)
