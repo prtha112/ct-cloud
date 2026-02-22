@@ -1,4 +1,4 @@
-use sqlx::{Pool, Mssql, Row, Column, TypeInfo};
+use sqlx::{Pool, Mssql, Row, Column};
 use sqlx::mssql::MssqlRow;
 use redis::Client;
 use log::{info, debug};

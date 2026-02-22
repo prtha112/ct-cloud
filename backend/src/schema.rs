@@ -110,7 +110,7 @@ pub async fn ensure_table_exists(
             create_sql.push_str(&format!(", PRIMARY KEY ({})", pk_columns.join(", ")));
         }
 
-        create_sql.push_str(")");
+        create_sql.push(')');
 
         info!("Executing: {}", create_sql);
         sqlx::query(&create_sql).execute(replica_pool).await?;
@@ -396,7 +396,7 @@ pub async fn sync_views(
     }
 
     // Drop missing views on replica
-    for (r_key, _) in &r_map {
+    for r_key in r_map.keys() {
         if !p_map.contains_key(r_key) {
             info!("Dropping View {}", r_key);
             let drop_sql = format!("DROP VIEW [{}]", r_key.replace(".", "].["));
