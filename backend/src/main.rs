@@ -1,9 +1,12 @@
 use std::env;
 use std::time::Duration;
+use std::sync::Arc;
+use std::collections::HashSet;
+use tokio::sync::{Semaphore, Mutex as TokioMutex};
 use sqlx::mssql::MssqlPoolOptions;
 use redis::Client;
 use dotenv::dotenv;
-use log::{info, error};
+use log::{info, error, debug};
 
 mod state;
 mod schema;
@@ -79,17 +82,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ddl_events::start_consumer_loop(ddl_primary, ddl_replica, ddl_redis).await;
     });
     
+    // Global Concurrency State
+    let semaphore = Arc::new(Semaphore::new(thread_count));
+    let active_tasks: Arc<TokioMutex<HashSet<String>>> = Arc::new(TokioMutex::new(HashSet::new()));
+
     loop {
-        if let Err(e) = sync::run_sync(&primary_pool, &replica_pool, &redis_client, thread_count).await {
-            error!("Sync error: {}", e);
+        // Fetch all tracked tables
+        let tables_query = "
+            SELECT t.name AS TableName
+            FROM sys.change_tracking_tables ctt
+            JOIN sys.tables t ON ctt.object_id = t.object_id
+        ";
+        
+        let tables_res = sqlx::query(tables_query).fetch_all(&primary_pool).await;
+        
+        match tables_res {
+            Ok(tables) => {
+                for row in tables {
+                    let table_name: String = sqlx::Row::get(&row, "TableName");
+                    
+                    // Check if table is currently syncing, skip if it is
+                    let mut tasks_guard = active_tasks.lock().await;
+                    if tasks_guard.contains(&table_name) {
+                        debug!("Table {} is already syncing, skipping iteration.", table_name);
+                        continue;
+                    }
+                    
+                    // Not syncing: mark as active and spawn detached task
+                    tasks_guard.insert(table_name.clone());
+                    drop(tasks_guard);
+
+                    let p_pool = primary_pool.clone();
+                    let r_pool = replica_pool.clone();
+                    let r_client = redis_client.clone();
+                    let sem_clone = Arc::clone(&semaphore);
+                    let active_clone = Arc::clone(&active_tasks);
+
+                    tokio::spawn(async move {
+                        // Attempt to acquire a permit. This will hang here if SYNC_THREADS is exhausted
+                        // but it won't block the main loop from checking and querying other things.
+                        let _permit = match sem_clone.acquire().await {
+                            Ok(p) => p,
+                            Err(_) => {
+                                active_clone.lock().await.remove(&table_name);
+                                return;
+                            }
+                        };
+                        
+                        // Pass off to sync process
+                        if let Err(e) = sync::run_single_table_sync(&p_pool, &r_pool, &r_client, &table_name).await {
+                            error!("Sync error on table {}: {}", table_name, e);
+                        }
+
+                        // Detach from active list
+                        active_clone.lock().await.remove(&table_name);
+                    });
+                }
+            },
+            Err(e) => error!("Failed to fetch table list: {}", e),
         }
 
-        // Sync views after all tables are processed (to avoid missing table dependencies)
+        // We run Views & Routines sequentially in the main loop every 5s as they are cheap DDL
         if let Err(e) = schema::sync_views(&primary_pool, &replica_pool).await {
             error!("View sync error: {}", e);
         }
 
-        // Sync stored procedures and functions
         if let Err(e) = schema::sync_routines(&primary_pool, &replica_pool).await {
             error!("Routine sync error: {}", e);
         }

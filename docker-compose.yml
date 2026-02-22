@@ -47,7 +47,7 @@ services:
       - MSSQL_PRIMARY_URL=mssql://sa:Password123!@mssql_primary:1433/testct
       - MSSQL_REPLICA_URL=mssql://sa:Password123!@mssql_replica:1433/testct
       - REDIS_URL=redis://redis:6379
-      - SYNC_THREADS=2
+      - SYNC_THREADS=5
       - RUST_LOG=error,backend=info
     restart: unless-stopped
 

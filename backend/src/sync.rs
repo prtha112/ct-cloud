@@ -1,93 +1,47 @@
 use sqlx::{Pool, Mssql, Row, Column};
 use sqlx::mssql::MssqlRow;
 use redis::Client;
+use std::time::{SystemTime, UNIX_EPOCH};
 use log::{info, debug};
 use crate::state;
 use crate::schema;
 
-pub async fn run_sync(
+pub async fn run_single_table_sync(
     primary_pool: &Pool<Mssql>,
     replica_pool: &Pool<Mssql>,
     redis_client: &Client,
-    thread_count: usize
+    table_name: &str
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Get enabled tables
-    let tables_query = "
-        SELECT 
-            t.name AS TableName
-        FROM sys.change_tracking_tables ctt
-        JOIN sys.tables t ON ctt.object_id = t.object_id
-    ";
+    debug!("Processing table: {}", table_name);
+
+    // 1. Initialize enabled flag in Redis if it doesn't exist
+    if let Err(e) = state::init_table_enabled(redis_client, table_name).await {
+        log::error!("Failed to initialize enabled flag for {}: {}", table_name, e);
+        return Ok(());
+    }
     
-    let tables = sqlx::query(tables_query)
-        .fetch_all(primary_pool)
-        .await?;
-
-    let table_names: Vec<String> = tables.into_iter()
-        .map(|row| row.get("TableName"))
-        .collect();
-
-    if table_names.is_empty() {
+    // Initialize force full load flag in Redis if it doesn't exist
+    if let Err(e) = state::init_force_full_load(redis_client, table_name).await {
+        log::error!("Failed to initialize force full load flag for {}: {}", table_name, e);
         return Ok(());
     }
 
-    let chunk_size = (table_names.len() as f64 / thread_count.max(1) as f64).ceil() as usize;
-    let chunks: Vec<Vec<String>> = table_names.chunks(chunk_size)
-        .map(|c| c.to_vec())
-        .collect();
-
-    let mut handles = Vec::new();
-
-    for chunk in chunks {
-        let p_pool = primary_pool.clone();
-        let r_pool = replica_pool.clone();
-        let r_client = redis_client.clone();
-
-        let handle = tokio::spawn(async move {
-            for table_name in chunk {
-                debug!("Processing table: {}", table_name);
-
-                // 1. Initialize enabled flag in Redis if it doesn't exist
-                if let Err(e) = state::init_table_enabled(&r_client, &table_name).await {
-                    log::error!("Failed to initialize enabled flag for {}: {}", table_name, e);
-                    continue;
-                }
-                
-                // Initialize force full load flag in Redis if it doesn't exist
-                if let Err(e) = state::init_force_full_load(&r_client, &table_name).await {
-                    log::error!("Failed to initialize force full load flag for {}: {}", table_name, e);
-                    continue;
-                }
-
-                // 2. Check if table synchronization is enabled
-                let is_enabled = state::is_table_enabled(&r_client, &table_name).await.unwrap_or(false);
-                if !is_enabled {
-                    info!("Sync skipped for table: {} (mssql_sync:enabled:{} is not true)", table_name, table_name);
-                    continue;
-                }
-                
-                // Ensure table exists on Replica
-                schema::ensure_table_exists(&p_pool, &r_pool, &table_name)
-                    .await
-                    .map_err(|e| format!("Schema error on {}: {}", table_name, e))?;
-
-                // Sync data
-                sync_table(&p_pool, &r_pool, &r_client, &table_name)
-                    .await
-                    .map_err(|e| format!("Sync error on {}: {}", table_name, e))?;
-            }
-            Ok::<(), String>(())
-        });
-        handles.push(handle);
+    // 2. Check if table synchronization is enabled
+    let is_enabled = state::is_table_enabled(redis_client, table_name).await.unwrap_or(false);
+    if !is_enabled {
+        info!("Sync skipped for table: {} (mssql_sync:enabled:{} is not true)", table_name, table_name);
+        return Ok(());
     }
+    
+    // Ensure table exists on Replica
+    schema::ensure_table_exists(primary_pool, replica_pool, table_name)
+        .await
+        .map_err(|e| format!("Schema error on {}: {}", table_name, e))?;
 
-    for handle in handles {
-        match handle.await {
-            Ok(Ok(())) => {},
-            Ok(Err(e)) => return Err(e.into()),
-            Err(e) => return Err(format!("Task join error: {}", e).into()),
-        }
-    }
+    // Sync data
+    sync_table(primary_pool, replica_pool, redis_client, table_name)
+        .await
+        .map_err(|e| format!("Sync error on {}: {}", table_name, e))?;
 
     Ok(())
 }
@@ -114,10 +68,13 @@ async fn sync_table(
     // Get Total Table Count
     let total_count_query = format!("SELECT CAST(COUNT_BIG(*) AS BIGINT) FROM [{}]", table_name);
     let total_records: i64 = sqlx::query_scalar(&total_count_query).fetch_one(primary_pool).await.unwrap_or(0);
+    
+    // Track execution startup time accurately from thread allocation
+    let started_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
 
     if !force_full_load && current_version <= last_version {
         // We are already fully synced
-        if let Err(e) = state::set_sync_progress(redis_client, table_name, total_records, total_records).await {
+        if let Err(e) = state::set_sync_progress(redis_client, table_name, total_records, total_records, started_at).await {
              log::warn!("Failed to store sync progress: {}", e);
         }
         return Ok(());
@@ -263,7 +220,7 @@ async fn sync_table(
             info!("Force Load Chunk: Table {} - Inserted {}/{} total rows", table_name, total_inserted, total_records);
             
             // Push Progress tracking to Redis!
-            if let Err(e) = state::set_sync_progress(redis_client, table_name, total_inserted, total_records).await {
+            if let Err(e) = state::set_sync_progress(redis_client, table_name, total_inserted, total_records, started_at).await {
                 log::warn!("Failed to set force-load sync progress: {}", e);
             }
 
@@ -383,7 +340,7 @@ async fn sync_table(
     }
 
     // Set Incremental Tracking Finished State
-    if let Err(e) = state::set_sync_progress(redis_client, table_name, total_records, total_records).await {
+    if let Err(e) = state::set_sync_progress(redis_client, table_name, total_records, total_records, started_at).await {
         log::warn!("Failed to set end-of-sync progress: {}", e);
     }
 

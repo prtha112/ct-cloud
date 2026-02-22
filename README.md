@@ -158,6 +158,10 @@ Along with Views, the app actively monitors and syncs Stored Procedures and User
 
 ## 🚀 Performance & Safety Optimizations
 
+### 🏎️ Independent Table Concurrency (Non-Blocking Sync)
+- **Decoupled Architecture:** The backend completely shatters traditional sequential queue processing. Each table is dynamically assigned its own independent asynchronous background process (`tokio::spawn`) that negotiates with an intelligent global `Semaphore` lock pool.
+- **Queue Jump:** Modest tables (e.g., configurations or users) will sprint instantly through the data pipeline and synchronize within milliseconds, securely bypassing massive operational tables (e.g., hundreds of thousands of active products) which securely occupy a long-running thread limit seat. Fast syncs no longer suffer bottleneck gridlock.
+
 ### ⚡ Accelerated Bulk Synchronization (Full Load Batch Insert)
 The historic `Force Full Load` feature no longer relies on executing row-by-row sequenced queries. It has been entirely re-architected to leverage **Massive Database Transactions** (`BEGIN TRAN ... COMMIT`).
 - The system binds thousands of single-row insert parameters simultaneously and submits them under an encapsulated, localized database transaction block.

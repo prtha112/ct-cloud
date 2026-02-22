@@ -58,11 +58,15 @@ pub async fn set_config(client: &Client, config_key: &str, value: &str) -> Redis
     Ok(())
 }
 
-pub async fn set_sync_progress(client: &Client, table_name: &str, synced: i64, total: i64) -> RedisResult<()> {
+pub async fn set_sync_progress(client: &Client, table_name: &str, synced: i64, total: i64, started_at: u128) -> RedisResult<()> {
     let mut con = client.get_connection()?;
     let key = format!("mssql_sync:progress:{}", table_name);
+    let updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     // Simple manual JSON string to avoid heavy dependencies for just one format
-    let progress_json = format!(r#"{{"synced":{},"total":{}}}"#, synced, total);
+    let progress_json = format!(r#"{{"synced":{},"total":{},"startedAt":{},"updatedAt":{}}}"#, synced, total, started_at, updated_at);
     let _: () = con.set(key, progress_json)?;
     Ok(())
 }

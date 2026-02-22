@@ -11,7 +11,7 @@ interface TableSyncState {
   enabled: boolean;
   forceFullLoad: boolean;
   version: number;
-  progress: { synced: number; total: number } | null;
+  progress: { synced: number; total: number; startedAt?: number; updatedAt?: number } | null;
 }
 
 interface AppConfig {
@@ -50,11 +50,17 @@ export default function Dashboard() {
 
         // If it was force loading before, but is no longer.
         if (prevTable && prevTable.forceFullLoad === true && t.forceFullLoad === false) {
-          const startTime = loadStartTimesRef.current[t.id];
+          // Use server-side timestamps to prevent Docker VM clock drift throwing off the timer
+          let elapsedMs = 0;
+          if (t.progress?.updatedAt && t.progress?.startedAt) {
+            elapsedMs = t.progress.updatedAt - t.progress.startedAt;
+          } else if (loadStartTimesRef.current[t.id]) {
+            elapsedMs = Date.now() - loadStartTimesRef.current[t.id];
+          }
+
           let timeMsg = "";
-          if (startTime) {
-            const elapsedMs = Date.now() - startTime;
-            const totalSeconds = Math.floor(elapsedMs / 1000);
+          if (elapsedMs > 0) {
+            const totalSeconds = Math.max(1, Math.floor(elapsedMs / 1000));
             const minutes = Math.floor(totalSeconds / 60);
             const seconds = totalSeconds % 60;
             if (minutes > 0) {
@@ -62,8 +68,10 @@ export default function Dashboard() {
             } else {
               timeMsg = ` in ${seconds}s`;
             }
-            delete loadStartTimesRef.current[t.id];
           }
+
+          // Clean up the ref
+          delete loadStartTimesRef.current[t.id];
 
           toast.success(`Full load completed for ${t.name}${timeMsg}!`, {
             duration: 5000,
