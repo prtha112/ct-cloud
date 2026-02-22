@@ -35,13 +35,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract Version
+        run: |
+          VERSION_NAME=${GITHUB_REF_NAME#release/}
+          echo "CLEAN_VERSION=$VERSION_NAME" >> $GITHUB_ENV
+
       - name: Extract metadata (tags, labels) for Backend
         id: meta-backend
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE_NAME }}
           tags: |
-            type=match,pattern=release/(.*),group=1
+            type=raw,value=${{ env.CLEAN_VERSION }},enable=${{ github.event_name == 'push' }}
             type=ref,event=pr
             type=raw,value=latest
 
@@ -61,7 +66,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}
           tags: |
-            type=match,pattern=release/(.*),group=1
+            type=raw,value=${{ env.CLEAN_VERSION }},enable=${{ github.event_name == 'push' }}
             type=ref,event=pr
             type=raw,value=latest
 
