@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
+import { Toaster, toast } from "react-hot-toast";
 import Image from "next/image";
 import { Database, RefreshCw, AlertCircle, CheckCircle2, ServerCog, PlaySquare, ToggleLeft, ToggleRight, ArrowRight } from "lucide-react";
 
@@ -25,6 +26,8 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [actingOn, setActingOn] = useState<string | null>(null);
   const [confirmTable, setConfirmTable] = useState<string | null>(null);
+  const prevTablesRef = useRef<TableSyncState[]>([]);
+  const loadStartTimesRef = useRef<Record<string, number>>({});
 
   const fetchTables = async () => {
     try {
@@ -32,7 +35,54 @@ export default function Dashboard() {
       if (!res.ok) throw new Error("Failed to fetch tables");
 
       const data = await res.json();
-      setTables(data.tables || []);
+      const newTables: TableSyncState[] = data.tables || [];
+
+      // Detect Full Load Completions 
+      newTables.forEach(t => {
+        const prevTable = prevTablesRef.current.find(pt => pt.id === t.id);
+
+        // Track when a full load starts if not explicitly triggered via the button
+        if ((!prevTable || prevTable.forceFullLoad === false) && t.forceFullLoad === true) {
+          if (!loadStartTimesRef.current[t.id]) {
+            loadStartTimesRef.current[t.id] = Date.now();
+          }
+        }
+
+        // If it was force loading before, but is no longer.
+        if (prevTable && prevTable.forceFullLoad === true && t.forceFullLoad === false) {
+          const startTime = loadStartTimesRef.current[t.id];
+          let timeMsg = "";
+          if (startTime) {
+            const elapsedMs = Date.now() - startTime;
+            const totalSeconds = Math.floor(elapsedMs / 1000);
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            if (minutes > 0) {
+              timeMsg = ` in ${minutes}m ${seconds}s`;
+            } else {
+              timeMsg = ` in ${seconds}s`;
+            }
+            delete loadStartTimesRef.current[t.id];
+          }
+
+          toast.success(`Full load completed for ${t.name}${timeMsg}!`, {
+            duration: 5000,
+            position: 'top-right',
+            style: {
+              background: '#171717',
+              color: '#fff',
+              border: '1px solid #262626',
+            },
+            iconTheme: {
+              primary: '#10b981',
+              secondary: '#fff',
+            },
+          });
+        }
+      });
+
+      prevTablesRef.current = newTables;
+      setTables(newTables);
       setError(null);
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred.");
@@ -57,7 +107,7 @@ export default function Dashboard() {
     fetchConfig();
     fetchTables();
     // Auto refresh every 5 seconds to get live status
-    const interval = setInterval(fetchTables, 5000);
+    const interval = setInterval(fetchTables, 2000);
     return () => clearInterval(interval);
   }, []);
 
@@ -92,6 +142,7 @@ export default function Dashboard() {
       });
 
       if (res.ok) {
+        loadStartTimesRef.current[tableId] = Date.now();
         setTables(prev => prev.map(t => t.id === tableId ? { ...t, forceFullLoad: true } : t));
       }
     } catch (err) {
@@ -103,6 +154,7 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-200 font-sans selection:bg-blue-500/30">
+      <Toaster />
 
       {/* Header */}
       <header className="border-b border-neutral-800 bg-neutral-900/50 backdrop-blur-xl sticky top-0 z-10">
