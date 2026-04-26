@@ -220,7 +220,7 @@ export default function Dashboard() {
         <div className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h2 className="text-3xl font-semibold text-white tracking-tight mb-2">Tracked Tables</h2>
-            <p className="text-neutral-400">Manage synchronization state and trigger force loads for individual database tables.</p>
+            <p className="text-neutral-400">Manage synchronization state and trigger full loads for individual database tables.</p>
           </div>
           <button
             onClick={fetchTables}
@@ -343,7 +343,7 @@ export default function Dashboard() {
                         title={!table.enabled ? "Enable sync first to trigger full load" : "Trigger Full Load"}
                       >
                         <PlaySquare className="w-4 h-4" />
-                        <span>Force Load</span>
+                        <span>Full Load</span>
                       </button>
                     )}
                   </div>
@@ -362,7 +362,7 @@ export default function Dashboard() {
             <div className="p-6">
               <div className="flex items-center space-x-4 text-amber-500 mb-4">
                 <AlertCircle className="w-8 h-8" />
-                <h3 className="text-xl font-semibold text-white">Confirm Force Load</h3>
+                <h3 className="text-xl font-semibold text-white">Confirm Full Load</h3>
               </div>
               <p className="text-neutral-400 mb-6">
                 Are you sure you want to trigger a Full Load for <strong className="text-white">{confirmTable}</strong>?

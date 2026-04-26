@@ -1,6 +1,6 @@
 services:
   mssql_primary:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: mcr.microsoft.com/mssql/server:2017-latest
     platform: linux/amd64
     container_name: mssql_primary
     hostname: mssql_primary
@@ -9,12 +9,15 @@ services:
     environment:
       - ACCEPT_EULA=Y
       - MSSQL_SA_PASSWORD=Password123!
+      - RUN_INIT=true
     volumes:
       - mssql_primary_data:/var/opt/mssql
+      - ./init:/init
+    entrypoint: /bin/bash /init/entrypoint.sh
     restart: unless-stopped
 
   mssql_replica:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: mcr.microsoft.com/mssql/server:2017-latest
     platform: linux/amd64
     container_name: mssql_replica
     hostname: mssql_replica
@@ -23,8 +26,12 @@ services:
     environment:
       - ACCEPT_EULA=Y
       - MSSQL_SA_PASSWORD=Password123!
+      - RUN_INIT=true
+      - INIT_FILE=/init/init_replica.sql
     volumes:
       - mssql_replica_data:/var/opt/mssql
+      - ./init:/init
+    entrypoint: /bin/bash /init/entrypoint.sh
     restart: unless-stopped
 
   redis:
